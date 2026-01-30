@@ -1,0 +1,4 @@
+@import "tailwindcss";
+@import "./assets/main.css";
+@config "./tailwind.config.js";
+@source "src/**/*.rs";

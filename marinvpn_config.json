@@ -1,0 +1,24 @@
+{
+  "settings": {
+    "launch_on_startup": false,
+    "auto_connect": false,
+    "local_sharing": true,
+    "protocol": "WireGuard",
+    "ipv6_support": true,
+    "quantum_resistant": false,
+    "split_tunneling": false,
+    "multi_hop": false,
+    "kill_switch": true,
+    "lockdown_mode": false,
+    "dns_blocking": {
+      "ads": false,
+      "trackers": false,
+      "malware": true,
+      "gambling": false,
+      "adult_content": false,
+      "social_media": false
+    }
+  },
+  "favorites": [],
+  "account_number": "3732 9223 8600 1117"
+}
