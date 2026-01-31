@@ -67,6 +67,18 @@ pub struct AppInfo {
     pub icon: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub enum StealthMode {
+    #[default]
+    Automatic,
+    WireGuardPort,
+    Lwo,
+    Quic,
+    Shadowsocks,
+    Tcp,
+    None,
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct SettingsState {
     pub dark_mode: bool,
@@ -75,13 +87,13 @@ pub struct SettingsState {
     pub local_sharing: bool,
     pub language: Language,
     pub protocol: Protocol,
+    pub stealth_mode: StealthMode,
     pub ipv6_support: bool,
     pub quantum_resistant: bool,
     pub split_tunneling: bool,
     pub multi_hop: bool,
     pub entry_location: String,
     pub exit_location: String,
-    pub kill_switch: bool,
     pub lockdown_mode: bool,
     pub obfuscation: bool,
     pub daita_enabled: bool,
@@ -103,13 +115,13 @@ impl Default for SettingsState {
             local_sharing: false,
             language: Language::English,
             protocol: Protocol::WireGuard,
+            stealth_mode: StealthMode::None,
             ipv6_support: true,
             quantum_resistant: false,
             split_tunneling: false,
             multi_hop: false,
             entry_location: "Automatic".to_string(),
             exit_location: "Automatic".to_string(),
-            kill_switch: true,
             lockdown_mode: false,
             obfuscation: false,
             daita_enabled: false,

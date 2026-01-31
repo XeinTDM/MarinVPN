@@ -15,7 +15,8 @@ async fn setup_app() -> axum::Router {
     settings.database.url = db_url.to_string();
     
     let vpn = marinvpn_server::services::vpn::VpnOrchestrator::new("wg0".to_string());
-    let state = Arc::new(AppState { db, settings, vpn });
+    let signer = marinvpn_server::services::auth::BlindSigner::new();
+    let state = Arc::new(AppState { db, settings, vpn, signer });
     
     api_routes().with_state(state)
 }

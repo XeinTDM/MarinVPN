@@ -187,12 +187,129 @@ pub fn AntiCensorshipSettings() -> Element {
                         "Configure settings to bypass network censorship and improve connectivity in restricted environments."
                     }
                 }
-                SettingRow {
-                    label: "Obfuscation".to_string(),
-                    checked: s.obfuscation,
-                    onclick: move |_| {
-                        state.settings.with_mut(|s| s.obfuscation = !s.obfuscation);
-                    },
+                
+                div { class: "p-4 bg-accent/5",
+                    h4 { class: "text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-3", "Stealth Protocol" }
+                    
+                    div { class: "space-y-1",
+                        // Automatic Mode
+                        div { 
+                            class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
+                            class: if s.stealth_mode == crate::models::StealthMode::Automatic { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
+                            onclick: move |_| {
+                                state.settings.with_mut(|s| s.stealth_mode = crate::models::StealthMode::Automatic);
+                            },
+                            div { class: "flex flex-col",
+                                span { class: "text-xs font-bold", "Automatic" }
+                                span { class: "text-[10px] opacity-70", "Intelligently select the best protocol for your network" }
+                            }
+                            if s.stealth_mode == crate::models::StealthMode::Automatic {
+                                CircleCheck { size: 14 }
+                            }
+                        }
+
+                        // WireGuard Port Mode
+                        div { 
+                            class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
+                            class: if s.stealth_mode == crate::models::StealthMode::WireGuardPort { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
+                            onclick: move |_| {
+                                state.settings.with_mut(|s| s.stealth_mode = crate::models::StealthMode::WireGuardPort);
+                            },
+                            div { class: "flex flex-col",
+                                span { class: "text-xs font-bold", "WireGuard Port" }
+                                span { class: "text-[10px] opacity-70", "Standard UDP but using common ports (e.g. 53, 123)" }
+                            }
+                            if s.stealth_mode == crate::models::StealthMode::WireGuardPort {
+                                CircleCheck { size: 14 }
+                            }
+                        }
+
+                        // LWO Mode
+                        div { 
+                            class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
+                            class: if s.stealth_mode == crate::models::StealthMode::Lwo { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
+                            onclick: move |_| {
+                                state.settings.with_mut(|s| s.stealth_mode = crate::models::StealthMode::Lwo);
+                            },
+                            div { class: "flex flex-col",
+                                span { class: "text-xs font-bold", "LWO (Lightweight)" }
+                                span { class: "text-[10px] opacity-70", "Obfuscated WireGuard headers with minimal overhead" }
+                            }
+                            if s.stealth_mode == crate::models::StealthMode::Lwo {
+                                CircleCheck { size: 14 }
+                            }
+                        }
+
+                        // QUIC Mode
+                        div { 
+                            class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
+                            class: if s.stealth_mode == crate::models::StealthMode::Quic { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
+                            onclick: move |_| {
+                                state.settings.with_mut(|s| s.stealth_mode = crate::models::StealthMode::Quic);
+                            },
+                            div { class: "flex flex-col",
+                                span { class: "text-xs font-bold", "QUIC (HTTP/3)" }
+                                span { class: "text-[10px] opacity-70", "High-performance UDP-over-QUIC" }
+                            }
+                            if s.stealth_mode == crate::models::StealthMode::Quic {
+                                CircleCheck { size: 14 }
+                            }
+                        }
+
+                        // Shadowsocks Mode
+                        div { 
+                            class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
+                            class: if s.stealth_mode == crate::models::StealthMode::Shadowsocks { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
+                            onclick: move |_| {
+                                state.settings.with_mut(|s| s.stealth_mode = crate::models::StealthMode::Shadowsocks);
+                            },
+                            div { class: "flex flex-col",
+                                span { class: "text-xs font-bold", "Shadowsocks (AEAD)" }
+                                span { class: "text-[10px] opacity-70", "Industry standard for circumvention" }
+                            }
+                            if s.stealth_mode == crate::models::StealthMode::Shadowsocks {
+                                CircleCheck { size: 14 }
+                            }
+                        }
+
+                        // Raw TCP Mode
+                        div { 
+                            class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
+                            class: if s.stealth_mode == crate::models::StealthMode::Tcp { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
+                            onclick: move |_| {
+                                state.settings.with_mut(|s| s.stealth_mode = crate::models::StealthMode::Tcp);
+                            },
+                            div { class: "flex flex-col",
+                                span { class: "text-xs font-bold", "UDP-over-TCP" }
+                                span { class: "text-[10px] opacity-70", "Raw TCP encapsulation via WSTunnel" }
+                            }
+                            if s.stealth_mode == crate::models::StealthMode::Tcp {
+                                CircleCheck { size: 14 }
+                            }
+                        }
+
+                        // Standard Mode
+                        div { 
+                            class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
+                            class: if s.stealth_mode == crate::models::StealthMode::None { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
+                            onclick: move |_| {
+                                state.settings.with_mut(|s| s.stealth_mode = crate::models::StealthMode::None);
+                            },
+                            div { class: "flex flex-col",
+                                span { class: "text-xs font-bold", "None" }
+                                span { class: "text-[10px] opacity-70", "Standard WireGuard UDP" }
+                            }
+                            if s.stealth_mode == crate::models::StealthMode::None {
+                                CircleCheck { size: 14 }
+                            }
+                        }
+                    }
+                }
+                
+                div { class: "p-4",
+                     p { class: "text-[10px] text-muted-foreground italic",
+                        "Note: Using obfuscation protocols may slightly increase latency and reduce throughput due to encryption overhead."
+                     }
                 }
             }
         }

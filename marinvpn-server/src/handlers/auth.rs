@@ -57,7 +57,12 @@ pub async fn issue_blind_token(
 
     let signed = state.signer.sign_blinded(&payload.blinded_message)?;
     
-    tracing::info!("Issued blind token for account {}", auth.account_number);
+    let masked = if auth.account_number.len() >= 4 {
+        format!("{}****", &auth.account_number[0..4])
+    } else {
+        "****".to_string()
+    };
+    tracing::info!("Issued blind token for account {}", masked);
     
     Ok(Json(BlindTokenResponse {
         signed_blinded_message: signed,
@@ -103,15 +108,27 @@ where
 pub async fn generate_account(
     State(state): State<Arc<AppState>>,
 ) -> AppResult<Json<GenerateResponse>> {
-    let account_number = {
-        let mut rng = rand::thread_rng();
-        format!("{:04} {:04} {:04} {:04}", 
-            rng.gen_range(0..10000), rng.gen_range(0..10000), 
-            rng.gen_range(0..10000), rng.gen_range(0..10000)
-        )
-    };
+    let mut attempts = 0;
+    let account = loop {
+        let account_number = {
+            let mut rng = rand::thread_rng();
+            format!("{:04} {:04} {:04} {:04}", 
+                rng.gen_range(0..10000), rng.gen_range(0..10000), 
+                rng.gen_range(0..10000), rng.gen_range(0..10000)
+            )
+        };
 
-    let account = state.db.create_account(&account_number, 30).await?;
+        match state.db.create_account(&account_number, 30).await {
+            Ok(acc) => break acc,
+            Err(_) if attempts < 5 => {
+                attempts += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    
+    let account_number = account.account_number.clone();
     
     let name = {
         let mut rng = rand::thread_rng();
@@ -120,7 +137,7 @@ pub async fn generate_account(
         format!("{} {}", adjectives[rng.gen_range(0..8)], nouns[rng.gen_range(0..8)])
     };
     
-    state.db.add_device(&account.account_number, &name).await?;
+    state.db.add_device(&account_number, &name).await?;
 
     Ok(Json(GenerateResponse { account_number }))
 }
@@ -148,6 +165,9 @@ pub async fn login(
     
     let device_name = if let Some(ref name) = payload.device_name {
         if !devices.iter().any(|d| d.name == *name) {
+            if devices.len() >= 5 {
+                return Err(AppError::BadRequest("Device limit reached (max 5). Please remove an existing device first.".to_string()));
+            }
             state.db.add_device(&account.account_number, name).await?;
         }
         name.clone()

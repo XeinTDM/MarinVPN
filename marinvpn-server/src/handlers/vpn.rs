@@ -70,18 +70,6 @@ pub async fn get_anonymous_config(
     let assigned_ip = state.db.get_or_create_peer(&payload.pub_key).await?;
     state.vpn.register_peer(&payload.pub_key, &assigned_ip).await?;
 
-    let dns_servers = if let Some(ref prefs) = payload.dns_blocking {
-        if prefs.ads || prefs.trackers || prefs.malware {
-            "94.140.14.14, 94.140.15.15".to_string()
-        } else if prefs.adult_content {
-            "1.1.1.3, 1.0.0.3".to_string()
-        } else {
-            "1.1.1.1, 8.8.8.8".to_string()
-        }
-    } else {
-        "1.1.1.1, 8.8.8.8".to_string()
-    };
-
     let (psk, pqc_info, pqc_ct) = if payload.quantum_resistant {
         if let Some(ref pk_b64) = payload.pqc_public_key {
             if let Some((ss_b64, ct_b64)) = encapsulate_pqc(pk_b64) {
@@ -97,6 +85,8 @@ pub async fn get_anonymous_config(
         (None, None, None)
     };
 
+    let obfuscation_key = base64::engine::general_purpose::STANDARD.encode(rand::thread_rng().gen::<[u8; 32]>());
+
     let config = WireGuardConfig {
         private_key: "".to_string(), 
         public_key: server.public_key,
@@ -108,6 +98,7 @@ pub async fn get_anonymous_config(
         pqc_handshake: pqc_info,
         pqc_provider: if payload.quantum_resistant { Some("MarinQuantum v1".to_string()) } else { None },
         pqc_ciphertext: pqc_ct,
+        obfuscation_key: Some(obfuscation_key),
     };
 
     Ok(Json(config))
@@ -178,6 +169,8 @@ pub async fn get_vpn_config(
         (None, None, None)
     };
 
+    let obfuscation_key = base64::engine::general_purpose::STANDARD.encode(rand::thread_rng().gen::<[u8; 32]>());
+
     let config = WireGuardConfig {
         private_key: "".to_string(), 
         public_key: server.public_key,
@@ -189,6 +182,7 @@ pub async fn get_vpn_config(
         pqc_handshake: pqc_info,
         pqc_provider: if payload.quantum_resistant { Some("MarinQuantum v1".to_string()) } else { None },
         pqc_ciphertext: pqc_ct,
+        obfuscation_key: Some(obfuscation_key),
     };
 
     Ok(Json(config))
@@ -223,7 +217,15 @@ pub async fn report_problem(
         "****".to_string()
     };
 
-    tracing::info!("PROBLEM REPORTED from {}: {}", masked_account, payload.message);
+    let cleaned_message = if payload.message.len() > 500 {
+        format!("{}... [TRUNCATED]", &payload.message[0..500])
+    } else {
+        payload.message.clone()
+    };
+
+    tracing::info!("PROBLEM REPORTED from {}: (Message length: {} bytes)", masked_account, cleaned_message.len());
+    // TODO: the message would be encrypted for the support team
+    // or sent to a secure processing queue, not logged to stdout.
     Ok(Json(true))
 }
 
@@ -231,7 +233,7 @@ pub async fn trigger_panic(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> AppResult<Json<bool>> {
-    let panic_key = std::env::var("PANIC_KEY").unwrap_or_else(|_| "emergency_default_2026".to_string());
+    let panic_key = &state.settings.auth.panic_key;
     let provided_key = headers.get("X-Panic-Key")
         .and_then(|h| h.to_str().ok())
         .ok_or(AppError::Unauthorized)?;
@@ -241,5 +243,8 @@ pub async fn trigger_panic(
     }
 
     state.db.panic_wipe().await?;
+    state.vpn.remove_all_peers().await?;
+    
+    tracing::error!("EMERGENCY PANIC WIPE COMPLETED. All ephemeral session data and peers removed.");
     Ok(Json(true))
 }

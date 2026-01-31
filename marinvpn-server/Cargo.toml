@@ -33,4 +33,12 @@ utoipa-swagger-ui = { version = "8.0", features = ["axum"] }
 axum-prometheus = "0.7"
 config = { version = "0.14", features = ["toml"] }
 anyhow = "1.0.100"
+argon2 = "0.5.3"
+password-hash = "0.5.0"
 marinvpn-common = { path = "../marinvpn-common", features = ["openapi", "validation", "db"] }
+
+[profile.release]
+opt-level = 3       # Maximize performance
+lto = true          # Link Time Optimization
+codegen-units = 1   # Better optimization
+panic = "abort"     # Performance and size

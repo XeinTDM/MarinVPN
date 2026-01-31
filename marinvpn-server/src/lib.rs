@@ -84,7 +84,7 @@ pub async fn run() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let db = services::db::Database::new(&settings.database.url).await.expect("Failed to initialize database");
+    let db = services::db::Database::new(&settings.database.url, &settings.auth.account_salt).await.expect("Failed to initialize database");
     let vpn_iface = std::env::var("WG_INTERFACE").unwrap_or_else(|_| "marinvpn0".to_string());
     let vpn_orchestrator = services::vpn::VpnOrchestrator::new(vpn_iface);
     let signer = services::auth::BlindSigner::new();
@@ -94,6 +94,23 @@ pub async fn run() {
         settings: settings.clone(),
         vpn: vpn_orchestrator,
         signer,
+    });
+
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            tracing::info!("Starting periodic cleanup of stale VPN sessions...");
+            match cleanup_state.db.cleanup_stale_sessions(86400).await {
+                Ok(stale_keys) => {
+                    for key in stale_keys {
+                        let _ = cleanup_state.vpn.remove_peer(&key).await;
+                    }
+                }
+                Err(e) => tracing::error!("Failed to cleanup stale sessions: {}", e),
+            }
+        }
     });
 
     let (prometheus_layer, metric_handle) = PrometheusMetricLayer::pair();
@@ -115,7 +132,27 @@ pub async fn run() {
         .nest("/api/v1", api_routes())
         .layer(prometheus_layer)
         .layer(GovernorLayer { config: governor_config })
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::http::Request<_>| {
+                    tracing::info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        uri = %request.uri().path(),
+                    )
+                })
+                .on_request(|_request: &axum::http::Request<_>, _span: &tracing::Span| {
+                    // Minimal logging on request
+                })
+                .on_response(|response: &axum::http::Response<_>, latency: Duration, _span: &tracing::Span| {
+                    tracing::info!(
+                        status = %response.status(),
+                        latency = ?latency,
+                        "finished processing request"
+                    )
+                })
+        )
+        .layer(axum::middleware::from_fn_with_state(state.clone(), verify_client_attestation))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -154,6 +191,54 @@ pub fn api_routes() -> Router<Arc<AppState>> {
 
 async fn health_check() -> &'static str {
     "OK"
+}
+
+async fn verify_client_attestation(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, error::AppError> {
+    let secret = &state.settings.auth.attestation_secret;
+    
+    let path = req.uri().path();
+    if path == "/health" || path.starts_with("/swagger-ui") || path.starts_with("/api-docs") {
+        return Ok(next.run(req).await);
+    }
+
+    let attestation = req.headers()
+        .get("X-Marin-Attestation")
+        .and_then(|h| h.to_str().ok())
+        .ok_or(error::AppError::Unauthorized)?;
+
+    let parts: Vec<&str> = attestation.split(':').collect();
+    if parts.len() != 2 {
+        tracing::warn!("Blocked request with invalid attestation format from {}", path);
+        return Err(error::AppError::Unauthorized);
+    }
+
+    let timestamp_str = parts[0];
+    let provided_sig = parts[1];
+
+    let timestamp = timestamp_str.parse::<i64>().map_err(|_| error::AppError::Unauthorized)?;
+    let now = chrono::Utc::now().timestamp();
+
+    if (now - timestamp).abs() > 60 {
+        tracing::warn!("Blocked request with expired attestation (diff: {}s) to {}", now - timestamp, path);
+        return Err(error::AppError::Unauthorized);
+    }
+
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hasher.update(timestamp_str.as_bytes());
+    let expected_sig = hex::encode(hasher.finalize());
+
+    if provided_sig != expected_sig {
+        tracing::warn!("Blocked unauthorized client request to {} (Signature mismatch)", path);
+        return Err(error::AppError::Unauthorized);
+    }
+
+    Ok(next.run(req).await)
 }
 
 async fn shutdown_signal() {

@@ -1,41 +1,55 @@
 # MarinVPN Architecture & Security Roadmap
 
-This document outlines the architectural choices and future improvements to ensure MarinVPN remains a TOP tier VPN in terms of privacy, security, and anonymity.
+This document outlines the architectural choices and implemented security measures that ensure MarinVPN remains a TOP tier VPN in terms of privacy, security, and anonymity.
 
 ## 1. Privacy & Anonymity
 
-### Blind Signature Authentication (Proposed)
-To completely decouple account numbers from VPN sessions, we are moving towards a Blind Signature model:
+### Blind Signature Authentication (Implemented)
+Account numbers are completely decoupled from VPN sessions using a Blind Signature model:
 1. **Issuance:** User authenticates with their account number and requests a blinded token. The server signs the blinded token.
 2. **Redemption:** The client unblinds the token and presents it to the server when requesting a VPN configuration.
-3. **Unlinkability:** The server can verify its own signature but cannot link the redeemed token back to the account that requested it.
+3. **Unlinkability:** The server verifies its signature but cannot link the redeemed token back to the account that requested it.
 
-### Ephemeral Peer Management
+### Ephemeral Peer Management & Lifecycle
 - **RAM-only Storage:** Peer public keys and assigned internal IPs are stored in an in-memory SQLite database (`ephemeral_pool`). They are wiped automatically on server restart.
-- **Unlinkability:** The database does not maintain any relationship between `account_number` and `peer_pub_key`.
+- **Session Lifecycle:** A background task purges stale VPN sessions and blinded tokens from RAM every 24 hours, ensuring a high degree of forward anonymity.
+- **Unlinkability:** The database maintains no relationship between `account_number` and `peer_pub_key`.
 
-### Daita (Data Anonymization)
-- **Traffic Masking:** MarinVPN implements Daita, which injects randomized noise traffic (UDP packets to common DNS providers) during idle periods.
-- **Timing Anonymity:** Noise packets are sent at randomized intervals with varying payload sizes to defeat advanced traffic analysis.
+### Daita (Defense Against AI-guided Traffic Analysis)
+- **Realistic Traffic Shaping:** Unlike simple noise injection, MarinVPN's Daita mimics real-world traffic patterns (Browsing, Media Streaming, and Heartbeats) with variable packet sizes and randomized timing to defeat advanced statistical analysis.
+- **Target Obfuscation:** Noise traffic is routed to common public DNS providers and various infrastructure endpoints to blend in with standard background internet noise.
 
 ## 2. Security
 
-### Post-Quantum Cryptography (PQC)
-- **Quantum Resistance:** WireGuard configurations support a Preshared Key (PSK) that can be derived from a PQC key exchange (e.g., ML-KEM).
-- **Metadata:** Configuration responses include PQC handshake details for client-side verification.
+### Dynamic Client Attestation
+- **HMAC-SHA256 Challenge:** To prevent API scraping and unauthorized access, every request is signed with a dynamic, timestamped HMAC-SHA256 keyed-hash.
+- **Replay Protection:** The server enforces a strict 60-second validity window for attestation signatures, rendering intercepted headers useless.
 
-### Kill Switch & Leak Protection
-- **Multi-OS Support:** Platform-specific implementations for Linux (`iptables`) and Windows (`netsh`/`WFP`) ensure no traffic leaves the device outside the VPN tunnel.
-- **IPv6 Protection:** All IPv6 traffic is blocked by default to prevent leakage, as most VPN servers currently operate on IPv4.
+### Fail-Closed Kill Switch & Leak Protection
+- **Windows Lockdown:** Implements a strict "Fail-Closed" policy using the Windows Filtering Platform (WFP). All outbound traffic is blocked by default, with an explicit whitelist only for the VPN endpoint and tunnel interfaces.
+- **Linux Nftables:** Uses `nftables` to enforce a drop-by-default policy, including explicit IPv6 blocking.
+- **DNS Leak Protection:** Forcefully blocks outbound traffic on port 53 (UDP/TCP) for all physical network adapters, ensuring DNS queries *must* traverse the encrypted tunnel.
+
+### Post-Quantum Cryptography (PQC)
+- **Quantum Resistance:** Supports ML-KEM-768 for hybrid key exchange. WireGuard PSKs are derived from a quantum-resistant handshake to protect today's traffic against future decryption by quantum computers.
 
 ## 3. Censorship Circumvention (Stealth Mode)
 
-### Advanced Obfuscation
-- **UDP-over-TCP/TLS:** Future support for wrapping WireGuard traffic in a TLS layer (via WSTunnel or similar) to bypass Deep Packet Inspection (DPI) in restrictive regimes.
-- **Bridge Support:** Ability to connect via bridge nodes before reaching the entry VPN server.
+### Advanced Obfuscation (Implemented)
+- **Automatic Stealth Discovery:** An intelligent failover system that automatically cycles through available obfuscation methods (LWO → QUIC → WebSocket) to find the most effective path for the current network.
+- **LWO (Lightweight WireGuard Obfuscation):** A low-overhead header shuffling technique designed to bypass protocol-based fingerprinting without the latency penalties of full TCP encapsulation.
+- **WireGuard-over-WSS:** Supports wrapping WireGuard traffic in a WebSocket/TLS layer using `wstunnel`.
+- **UDP-over-TCP:** Provides raw TCP encapsulation for WireGuard packets using `wstunnel` in TCP mode. This is useful for networks where all UDP traffic is blocked but non-HTTPS TCP is allowed.
+- **Shadowsocks (AEAD):** Integrated support for Shadowsocks (using AES-256-GCM) as a secondary stealth layer.
+- **QUIC (UDP-over-QUIC):** Leverages the QUIC protocol (HTTP/3) to wrap VPN traffic. This is highly effective against ISP throttling of standard UDP and provides better performance on lossy networks by utilizing QUIC's superior congestion control and stream multiplexing.
+
+### DNS-over-HTTPS (DoH) Fallback
+- **Censorship Resilience:** The client includes a built-in DoH resolver (using Cloudflare/Google infrastructure) to resolve MarinVPN API endpoints. This bypasses ISP-level DNS hijacking or blocking.
+
+### Failover & Server Hopping
+- **Health Monitoring:** Continuous end-to-end health checks verify tunnel connectivity. If a "Silent Dead" tunnel is detected, the client automatically re-scans for the best available server and hops to a new entry point.
 
 ## 4. Usability
 
 ### Multi-hop (Double VPN)
-- **Nested Tunnels:** Support for nesting an exit tunnel inside an entry tunnel directly within the client logic, providing an extra layer of anonymity.
-- **UI Integration:** Simple toggle for "Double VPN" with easy location selection.
+- **Nested Tunnels:** Support for nesting an exit tunnel inside an entry tunnel directly within the client logic, providing an extra layer of anonymity (Entry → Exit).

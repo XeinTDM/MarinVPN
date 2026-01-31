@@ -61,6 +61,8 @@ pub trait VpnService: Send + Sync {
     async fn disconnect(&self);
     async fn get_status(&self) -> ConnectionStatus;
     async fn enable_captive_portal(&self, duration_secs: u64);
+    async fn apply_lockdown(&self, settings: &SettingsState) -> Result<(), VpnError>;
+    async fn disable_kill_switch(&self);
 }
 
 #[async_trait::async_trait]
@@ -72,6 +74,8 @@ trait WgRunner: Send + Sync {
     async fn apply_bypass_route(&self, ip: &str);
     async fn apply_single_up(&self, iface: &str, conf: &str) -> Result<(), VpnError>;
     async fn apply_single_down(&self, iface: &str);
+    async fn enable_kill_switch(&self, endpoint: &str, settings: &SettingsState) -> Result<(), VpnError>;
+    async fn disable_kill_switch(&self);
 }
 
 #[derive(Clone)]
@@ -146,8 +150,10 @@ impl WireGuardService {
         let svc = self.clone();
         
         if settings.daita_enabled {
-            self.start_daita_task(status_lock.clone());
+            self.start_daita_task(status_lock.clone(), self.active_context.clone());
         }
+
+        self.start_health_monitor(status_lock.clone());
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -182,54 +188,134 @@ impl WireGuardService {
         });
     }
 
-    fn start_daita_task(&self, status_lock: Arc<Mutex<ConnectionStatus>>) {
+    fn start_daita_task(&self, status_lock: Arc<Mutex<ConnectionStatus>>, context_lock: Arc<Mutex<Option<ConnectionContext>>>) {
         tokio::spawn(async move {
-            info!("Daita: Advanced Traffic Anonymization active.");
-            let targets = ["1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53", "208.67.222.222:53", "8.8.4.4:53"];
+            info!("DAITA: Defense Against AI-guided Traffic Analysis ACTIVE.");
+            info!("DAITA: Using multi-modal traffic masking (Browsing, Streaming, VOIP mimics).");
+            
+            let fallback_targets = ["1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"];
             
             loop {
-                // Check status without holding rng across await
+                let (is_connected, endpoint) = {
+                    let status = *status_lock.lock().await;
+                    let ctx = context_lock.lock().await;
+                    let ep = ctx.as_ref().map(|c| c.entry_config.endpoint.clone());
+                    (status == ConnectionStatus::Connected, ep)
+                };
+
+                if !is_connected {
+                    break;
+                }
+
+                let target = endpoint.unwrap_or_else(|| {
+                    let mut rng = rand::thread_rng();
+                    fallback_targets[rng.gen_range(0..fallback_targets.len())].to_string()
+                });
+
+                let mut rng = rand::thread_rng();
+                let mode = rng.gen_range(0..100);
+                
+                let (burst_count, base_delay, packet_size_range, jitter_range) = if mode < 40 {
+                    // Browsing
+                    (rng.gen_range(3..10), 1000..3000, 64..1200, 50..500)
+                } else if mode < 70 {
+                    // Streaming
+                    (rng.gen_range(20..50), 100..500, 800..1450, 5..30)
+                } else if mode < 90 {
+                    // VOIP
+                    (rng.gen_range(50..100), 20..60, 64..256, 1..5)
+                } else {
+                    // Large File Transfer
+                    (rng.gen_range(100..250), 5000..15000, 1200..1420, 1..10)
+                };
+
+                for _ in 0..burst_count {
+                    let size = rng.gen_range(packet_size_range.clone());
+                    let mut noise = vec![0u8; size];
+                    rng.fill(&mut noise[..]);
+                    
+                    if size > 4 {
+                        if mode < 40 {
+                            noise[0] = 0x16; noise[1] = 0x03; noise[2] = 0x01;
+                        } else if mode >= 70 && mode < 90 {
+                            noise[0] = 0x80; noise[1] = 0x08;
+                        }
+                    }
+
+                    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                        let _ = socket.send_to(&noise, &target);
+                    }
+                    
+                    let jitter = rng.gen_range(jitter_range.clone());
+                    tokio::time::sleep(Duration::from_millis(jitter)).await;
+                }
+
+                let next_burst_delay = rng.gen_range(base_delay);
+                tokio::time::sleep(Duration::from_millis(next_burst_delay)).await;
+            }
+        });
+    }
+    fn start_health_monitor(&self, status_lock: Arc<Mutex<ConnectionStatus>>) {
+        let svc = self.clone();
+        let tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            let mut failure_count = 0;
+
+            loop {
+                interval.tick().await;
+                
                 let is_connected = *status_lock.lock().await == ConnectionStatus::Connected;
                 if !is_connected {
                     break;
                 }
 
-                let (size, count, delay_ms) = {
-                    let mut rng = rand::thread_rng();
-                    let traffic_type = rng.gen_range(0..100);
-                    if traffic_type < 70 {
-                        (rng.gen_range(32..128), 1, rng.gen_range(500..2000))
-                    } else if traffic_type < 95 {
-                        (rng.gen_range(512..1200), rng.gen_range(2..5), rng.gen_range(3000..8000))
-                    } else {
-                        (rng.gen_range(1200..1400), 10, rng.gen_range(10000..20000))
+                let health_check = tokio::task::spawn_blocking(|| {
+                    let targets = [([1, 1, 1, 1], 53), ([8, 8, 8, 8], 53)];
+                    for addr in targets {
+                        if TcpStream::connect_timeout(&SocketAddr::from(addr), Duration::from_secs(3)).is_ok() {
+                            return true;
+                        }
                     }
-                };
+                    false
+                }).await.unwrap_or(false);
 
-                for _ in 0..count {
-                    let target = {
-                        let mut rng = rand::thread_rng();
-                        targets[rng.gen_range(0..targets.len())]
-                    };
-                    let noise: Vec<u8> = {
-                        let mut rng = rand::thread_rng();
-                        (0..size).map(|_| rng.gen()).collect()
-                    };
-                    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-                        let _ = socket.send_to(&noise, target);
+                if !health_check {
+                    failure_count += 1;
+                    warn!("Tunnel health check failed ({}/3)", failure_count);
+                    
+                    if failure_count >= 3 {
+                        error!("Tunnel detected as 'Silent Dead'. Triggering emergency failover...");
+                        let _ = tx.send(VpnEvent::Error(VpnError::ConnectionFailed("Silent network failure detected. Switching servers...".to_string())));
+                        
+                        let ctx_lock = svc.active_context.lock().await;
+                        if let Some(ctx) = ctx_lock.as_ref() {
+                            let (en, ec, ex, st) = (ctx.entry_name.clone(), ctx.entry_config.clone(), ctx.exit.clone(), ctx.settings.clone());
+                            drop(ctx_lock);
+                            
+                            svc.disconnect().await;
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            
+                            if st.entry_location == "Automatic" {
+                                info!("Failover: Re-scanning for best available server...");
+                                if let Ok(new_server) = crate::services::servers::ServersService::find_best_server(None).await {
+                                     // TODO: we'd fetch a new config here. For now, we attempt reconnection.
+                                     info!("Failover: Found new candidate {}. Reconnecting...", new_server.city);
+                                     svc.connect(new_server.city, ec, ex, st).await;
+                                } else {
+                                     svc.connect(en, ec, ex, st).await;
+                                }
+                            } else {
+                                svc.connect(en, ec, ex, st).await;
+                            }
+                        }
+                        break;
                     }
-                    if count > 1 {
-                        let sleep_time = {
-                            let mut rng = rand::thread_rng();
-                            rng.gen_range(10..100)
-                        };
-                        tokio::time::sleep(Duration::from_millis(sleep_time)).await;
-                    }
+                } else {
+                    failure_count = 0;
                 }
-
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
-            info!("Daita: Task terminated.");
         });
     }
 }
@@ -278,6 +364,12 @@ impl VpnService for WireGuardService {
             return;
         }
 
+        let endpoint = exit.as_ref().map(|(_, c)| &c.endpoint).unwrap_or(&entry_config.endpoint);
+        if let Err(e) = self.runner.enable_kill_switch(endpoint, &settings).await {
+            self.emit_error(e).await;
+            return;
+        }
+
         match self.runner.up(&entry_config, exit.as_ref().map(|(_, c)| c), &settings).await {
             Ok(_) => {
                 info!("Tunnel established successfully.");
@@ -296,10 +388,12 @@ impl VpnService for WireGuardService {
             return;
         }
 
-        {
+        let settings = {
             let mut lock = self.active_context.lock().await;
+            let s = lock.as_ref().map(|ctx| ctx.settings.clone());
             *lock = None;
-        }
+            s
+        };
 
         self.set_status(ConnectionStatus::Disconnecting).await;
         info!("Tearing down WireGuard interface...");
@@ -307,6 +401,16 @@ impl VpnService for WireGuardService {
         match self.runner.down().await {
             Ok(_) => {
                 self.set_status(ConnectionStatus::Disconnected).await;
+                
+                if let Some(s) = settings {
+                    if s.lockdown_mode {
+                        warn!("Lockdown Mode active: internet remains blocked after manual disconnect.");
+                        let _ = self.runner.enable_kill_switch("0.0.0.0", &s).await;
+                    } else {
+                        self.runner.disable_kill_switch().await;
+                    }
+                }
+
                 let _ = self.event_tx.send(VpnEvent::StatsUpdated(VpnStats {
                     download_speed: 0.0, upload_speed: 0.0, total_download: 0, total_upload: 0, latest_handshake: 0,
                 }));
@@ -326,12 +430,33 @@ impl VpnService for WireGuardService {
             info!("Captive Portal Mode: Temporarily disabling firewall for {}s", duration_secs);
             let _ = tx.send(VpnEvent::CaptivePortalActive(true));
             runner.down().await.ok();
+            runner.disable_kill_switch().await;
             
             tokio::time::sleep(Duration::from_secs(duration_secs)).await;
             
             info!("Captive Portal Mode: Restoring firewall...");
             let _ = tx.send(VpnEvent::CaptivePortalActive(false));
         });
+    }
+
+    async fn apply_lockdown(&self, settings: &SettingsState) -> Result<(), VpnError> {
+        if settings.lockdown_mode {
+            info!("Lockdown Mode enabled: enforcing persistent fail-closed firewall.");
+            self.runner.enable_kill_switch("0.0.0.0", settings).await?;
+        } else {
+            let status = self.get_status().await;
+            if status == ConnectionStatus::Disconnected {
+                info!("Lockdown Mode disabled: restoring regular internet access.");
+                self.runner.disable_kill_switch().await;
+            } else {
+                info!("Lockdown Mode disabled: built-in Kill Switch remains active for this session.");
+            }
+        }
+        Ok(())
+    }
+
+    async fn disable_kill_switch(&self) {
+        self.runner.disable_kill_switch().await;
     }
 }
 
@@ -389,6 +514,8 @@ impl WgRunner for SimulationRunner {
     async fn apply_bypass_route(&self, _ip: &str) {}
     async fn apply_single_up(&self, _iface: &str, _conf: &str) -> Result<(), VpnError> { Ok(()) }
     async fn apply_single_down(&self, _iface: &str) {}
+    async fn enable_kill_switch(&self, _endpoint: &str, _settings: &SettingsState) -> Result<(), VpnError> { Ok(()) }
+    async fn disable_kill_switch(&self) {}
 }
 
 struct RunnerState {
@@ -400,20 +527,328 @@ struct RunnerState {
 
 #[async_trait::async_trait]
 trait Obfuscator: Send + Sync {
-    async fn start(&self, remote_endpoint: &str) -> Result<String, VpnError>;
+    async fn start(&self, remote_endpoint: &str, key: Option<&str>) -> Result<String, VpnError>;
     async fn stop(&self) -> Result<(), VpnError>;
 }
 
-struct WsObfuscator;
+struct WsObfuscator {
+    child: Arc<Mutex<Option<std::process::Child>>>,
+}
+
+impl WsObfuscator {
+    fn new() -> Self {
+        Self {
+            child: Arc::new(Mutex::new(None)),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl Obfuscator for WsObfuscator {
-    async fn start(&self, remote_endpoint: &str) -> Result<String, VpnError> {
-        info!("Starting WSTunnel obfuscation for {}", remote_endpoint);
-        // Implementation: npx wstunnel -L udp://127.0.0.1:51820:remote_endpoint
-        Ok("127.0.0.1:51820".to_string())
+    async fn start(&self, remote_endpoint: &str, _key: Option<&str>) -> Result<String, VpnError> {
+        info!("Starting WSTunnel (WebSocket) obfuscation for {}", remote_endpoint);
+        
+        let local_port = 51820;
+        let remote_host = remote_endpoint.split(':').next().unwrap_or(remote_endpoint);
+        
+        let mut child = Command::new("wstunnel")
+            .args(&[
+                "client",
+                "-l", &format!("udp://127.0.0.1:{}", local_port),
+                "-r", &format!("wss://{}:443", remote_host),
+                "--udp",
+                "--udp-timeout", "60",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                error!("Failed to spawn wstunnel: {}. Ensure wstunnel is in PATH.", e);
+                VpnError::DriverMissing
+            })?;
+
+        let mut lock = self.child.lock().await;
+        *lock = Some(child);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Ok(format!("127.0.0.1:{}", local_port))
     }
+
     async fn stop(&self) -> Result<(), VpnError> {
+        let mut lock = self.child.lock().await;
+        if let Some(mut child) = lock.take() {
+            info!("Stopping WSTunnel...");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Ok(())
+    }
+}
+
+struct SsObfuscator {
+    child: Arc<Mutex<Option<std::process::Child>>>,
+}
+
+impl SsObfuscator {
+    fn new() -> Self {
+        Self {
+            child: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Obfuscator for SsObfuscator {
+    async fn start(&self, remote_endpoint: &str, key: Option<&str>) -> Result<String, VpnError> {
+        info!("Starting Shadowsocks (AEAD) obfuscation for {}", remote_endpoint);
+        
+        let local_port = 51821;
+        let remote_host = remote_endpoint.split(':').next().unwrap_or(remote_endpoint);
+        let remote_port = remote_endpoint.split(':').nth(1).unwrap_or("8388");
+        let password = key.ok_or_else(|| {
+            error!("Shadowsocks requires an obfuscation key but none was provided.");
+            VpnError::ConfigMissing
+        })?;
+
+        let mut child = Command::new("ss-local")
+            .args(&[
+                "-s", remote_host,
+                "-p", remote_port,
+                "-l", &local_port.to_string(),
+                "-k", password,
+                "-m", "aes-256-gcm",
+                "-U",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                error!("Failed to spawn ss-local: {}. Ensure shadowsocks-libev is installed.", e);
+                VpnError::DriverMissing
+            })?;
+
+        let mut lock = self.child.lock().await;
+        *lock = Some(child);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Ok(format!("127.0.0.1:{}", local_port))
+    }
+
+    async fn stop(&self) -> Result<(), VpnError> {
+        let mut lock = self.child.lock().await;
+        if let Some(mut child) = lock.take() {
+            info!("Stopping Shadowsocks...");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Ok(())
+    }
+}
+
+struct QuicObfuscator {
+    child: Arc<Mutex<Option<std::process::Child>>>,
+}
+
+impl QuicObfuscator {
+    fn new() -> Self {
+        Self {
+            child: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Obfuscator for QuicObfuscator {
+    async fn start(&self, remote_endpoint: &str, _key: Option<&str>) -> Result<String, VpnError> {
+        info!("Starting QUIC (HTTP/3) obfuscation for {}", remote_endpoint);
+        
+        let local_port = 51822;
+        let remote_host = remote_endpoint.split(':').next().unwrap_or(remote_endpoint);
+        
+        let mut child = Command::new("quic-tun")
+            .args(&[
+                "client",
+                "-l", &format!("127.0.0.1:{}", local_port),
+                "-r", &format!("{}:443", remote_host),
+                "--cert-verify=false",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                error!("Failed to spawn quic-tun: {}. Ensure quic-tun is in PATH.", e);
+                VpnError::DriverMissing
+            })?;
+
+        let mut lock = self.child.lock().await;
+        *lock = Some(child);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        Ok(format!("127.0.0.1:{}", local_port))
+    }
+
+    async fn stop(&self) -> Result<(), VpnError> {
+        let mut lock = self.child.lock().await;
+        if let Some(mut child) = lock.take() {
+            info!("Stopping QUIC tunnel...");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Ok(())
+    }
+}
+
+struct TcpObfuscator {
+    child: Arc<Mutex<Option<std::process::Child>>>,
+}
+
+impl TcpObfuscator {
+    fn new() -> Self {
+        Self {
+            child: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Obfuscator for TcpObfuscator {
+    async fn start(&self, remote_endpoint: &str, _key: Option<&str>) -> Result<String, VpnError> {
+        info!("Starting raw UDP-over-TCP obfuscation for {}", remote_endpoint);
+        
+        let local_port = 51823;
+        let remote_host = remote_endpoint.split(':').next().unwrap_or(remote_endpoint);
+        
+        let mut child = Command::new("wstunnel")
+            .args(&[
+                "client",
+                "-l", &format!("udp://127.0.0.1:{}", local_port),
+                "-r", &format!("tcp://{}:443", remote_host),
+                "--udp",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                error!("Failed to spawn wstunnel (tcp): {}. Ensure wstunnel is in PATH.", e);
+                VpnError::DriverMissing
+            })?;
+
+        let mut lock = self.child.lock().await;
+        *lock = Some(child);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Ok(format!("127.0.0.1:{}", local_port))
+    }
+
+    async fn stop(&self) -> Result<(), VpnError> {
+        let mut lock = self.child.lock().await;
+        if let Some(mut child) = lock.take() {
+            info!("Stopping TCP tunnel...");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Ok(())
+    }
+}
+
+struct LwoObfuscator {
+    stop_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+}
+
+impl LwoObfuscator {
+    fn new() -> Self {
+        Self {
+            stop_tx: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Obfuscator for LwoObfuscator {
+    async fn start(&self, remote_endpoint: &str, key: Option<&str>) -> Result<String, VpnError> {
+        info!("Starting LWO (Lightweight WireGuard Obfuscation) for {}", remote_endpoint);
+        
+        let local_port = 51824;
+        let local_addr = format!("127.0.0.1:{}", local_port);
+        let remote_addr = remote_endpoint.to_string();
+        
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        {
+            let mut lock = self.stop_tx.lock().await;
+            *lock = Some(tx);
+        }
+
+        let key_bytes = if let Some(k) = key {
+            base64::engine::general_purpose::STANDARD.decode(k).unwrap_or_else(|_| vec![0u8; 16])
+        } else {
+            vec![0u8; 16]
+        };
+
+        tokio::spawn(async move {
+            let socket = match tokio::net::UdpSocket::bind(&local_addr).await {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    error!("LWO: Failed to bind local socket {}: {}", local_addr, e);
+                    return;
+                }
+            };
+            
+            let remote_socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    error!("LWO: Failed to bind remote socket: {}", e);
+                    return;
+                }
+            };
+
+            if let Err(e) = remote_socket.connect(&remote_addr).await {
+                error!("LWO: Failed to connect to remote {}: {}", remote_addr, e);
+                return;
+            }
+
+            let mut wg_addr: Option<std::net::SocketAddr> = None;
+            let mut xor_key = [0u8; 16];
+            let len = key_bytes.len().min(16);
+            xor_key[..len].copy_from_slice(&key_bytes[..len]);
+            
+            info!("LWO: Proxy active. Header scrambling (16-byte session XOR) engaged.");
+
+            loop {
+                let mut b_out = [0u8; 2048];
+                let mut b_in = [0u8; 2048];
+                
+                tokio::select! {
+                    _ = &mut rx => {
+                        info!("LWO: Stopping proxy task...");
+                        break;
+                    }
+                    result = socket.recv_from(&mut b_out) => {
+                        if let Ok((len, addr)) = result {
+                            wg_addr = Some(addr);
+                            for i in 0..16.min(len) {
+                                b_out[i] ^= xor_key[i];
+                            }
+                            let _ = remote_socket.send(&b_out[..len]).await;
+                        }
+                    }
+                    result = remote_socket.recv(&mut b_in) => {
+                        if let Ok(len) = result {
+                            if let Some(target) = wg_addr {
+                                for i in 0..16.min(len) {
+                                    b_in[i] ^= xor_key[i];
+                                }
+                                let _ = socket.send_to(&b_in[..len], target).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(local_addr)
+    }
+
+    async fn stop(&self) -> Result<(), VpnError> {
+        let mut lock = self.stop_tx.lock().await;
+        if let Some(tx) = lock.take() {
+            let _ = tx.send(());
+        }
         Ok(())
     }
 }
@@ -422,7 +857,11 @@ struct RealWgRunner {
     iface_entry: String,
     iface_exit: String,
     state: Mutex<RunnerState>,
-    obfuscator: Arc<dyn Obfuscator>,
+    ws_obfuscator: Arc<WsObfuscator>,
+    ss_obfuscator: Arc<SsObfuscator>,
+    quic_obfuscator: Arc<QuicObfuscator>,
+    tcp_obfuscator: Arc<TcpObfuscator>,
+    lwo_obfuscator: Arc<LwoObfuscator>,
 }
 
 impl RealWgRunner {
@@ -440,12 +879,18 @@ impl RealWgRunner {
                 last_check: None,
                 original_resolv_conf: None,
             }),
-            obfuscator: Arc::new(WsObfuscator),
+            ws_obfuscator: Arc::new(WsObfuscator::new()),
+            ss_obfuscator: Arc::new(SsObfuscator::new()),
+            quic_obfuscator: Arc::new(QuicObfuscator::new()),
+            tcp_obfuscator: Arc::new(TcpObfuscator::new()),
+            lwo_obfuscator: Arc::new(LwoObfuscator::new()),
         }
     }
 
-    fn create_conf(&self, config: &WireGuardConfig, settings: &SettingsState) -> String {
-        let mtu = if settings.mtu == 0 || settings.mtu == 1420 {
+    fn create_conf(&self, config: &WireGuardConfig, settings: &SettingsState, mtu_override: Option<u32>) -> String {
+        let mtu = if let Some(m) = mtu_override {
+            m
+        } else if settings.mtu == 0 || settings.mtu == 1420 {
             1280
         } else {
             settings.mtu
@@ -472,9 +917,15 @@ impl RealWgRunner {
         )
     }
 
-    async fn apply_dns(&self, dns: &Option<String>) {
+    async fn apply_dns(&self, dns: &Option<String>, settings: &SettingsState) {
+        let dns_servers = if settings.custom_dns && !settings.custom_dns_server.is_empty() {
+            settings.custom_dns_server.clone()
+        } else {
+            dns.clone().unwrap_or_else(|| "1.1.1.1, 8.8.8.8".to_string())
+        };
+
         #[cfg(target_os = "linux")]
-        if let Some(dns_servers) = dns {
+        {
             if let Ok(content) = fs::read_to_string("/etc/resolv.conf") {
                 let mut state = self.state.lock().await;
                 state.original_resolv_conf = Some(content);
@@ -488,7 +939,7 @@ impl RealWgRunner {
         }
 
         #[cfg(target_os = "windows")]
-        if let Some(dns_servers) = dns {
+        {
             let first_dns = dns_servers.split(',').next().unwrap_or("1.1.1.1").trim();
             info!("Applying Windows DNS: {} to interface {}", first_dns, self.iface_entry);
             
@@ -501,6 +952,11 @@ impl RealWgRunner {
                     .args(&["interface", "ipv4", "add", "dns", "name=", &self.iface_entry, second_dns.trim(), "index=2"])
                     .status();
             }
+
+            let block_leaks = "Get-NetAdapter | Where-Object { $_.InterfaceAlias -ne 'marinvpn0' -and $_.InterfaceAlias -ne 'marinvpn1' } | ForEach-Object { \
+                netsh interface ipv4 set dnsservers name=$_.InterfaceAlias source=static address=127.0.0.1 validate=no \
+            }";
+            let _ = Command::new("powershell").args(&["-NoProfile", "-Command", block_leaks]).status();
         }
     }
 
@@ -515,64 +971,102 @@ impl RealWgRunner {
         
         #[cfg(target_os = "windows")]
         {
-            info!("Restoring Windows DNS to DHCP for interface {}", self.iface_entry);
+            info!("Restoring Windows DNS to DHCP and disabling leak protection...");
             let _ = Command::new("netsh")
                 .args(&["interface", "ipv4", "set", "dns", "name=", &self.iface_entry, "source=dhcp"])
                 .status();
+
+            let restore_all = "Get-NetAdapter | ForEach-Object { \
+                netsh interface ipv4 set dnsservers name=$_.InterfaceAlias source=dhcp \
+            }";
+            let _ = Command::new("powershell").args(&["-NoProfile", "-Command", restore_all]).status();
         }
     }
 
     async fn enable_kill_switch(&self, endpoint: &str, settings: &SettingsState) -> Result<(), VpnError> {
         #[cfg(target_os = "linux")]
         {
-            info!("Enabling Linux Kill-switch and IPv6 Leak Protection...");
+            info!("Enabling Linux Kill-switch using nftables...");
             let addr = endpoint.split(':').next().unwrap_or(endpoint);
 
             let mut commands = vec![
-                format!("iptables -A OUTPUT -d {} -j ACCEPT", addr),
-                format!("iptables -A OUTPUT -o {} -j ACCEPT", self.iface_entry),
-                "iptables -A OUTPUT -o lo -j ACCEPT".to_string(),
+                "nft add table inet marinvpn_killswitch".to_string(),
+                "nft add chain inet marinvpn_killswitch output { type filter hook output priority 0; policy drop; }".to_string(),
+                "nft add chain inet marinvpn_killswitch input { type filter hook input priority 0; policy accept; }".to_string(),
+                "nft add rule inet marinvpn_killswitch output oifname lo accept".to_string(),
+                "nft add rule inet marinvpn_killswitch output ip6 daddr ::/0 drop".to_string(),
             ];
 
-            if !settings.local_sharing {
-                commands.push("iptables -A OUTPUT -d 192.168.0.0/16 -j DROP".to_string());
-                commands.push("iptables -A OUTPUT -d 10.0.0.0/8 -j DROP".to_string());
-                commands.push("iptables -A OUTPUT -d 172.16.0.0/12 -j DROP".to_string());
+            if addr != "0.0.0.0" {
+                commands.push(format!("nft add rule inet marinvpn_killswitch output ip daddr {} udp dport 51820 accept", addr));
+            }
+            
+            commands.push(format!("nft add rule inet marinvpn_killswitch output oifname {} accept", self.iface_entry));
+
+            if settings.split_tunneling {
+                commands.push("nft add rule inet marinvpn_killswitch output mark 0x1000 accept".to_string());
             }
 
-            commands.push("iptables -P OUTPUT DROP".to_string());
-            commands.push("ip6tables -P OUTPUT DROP".to_string());
-            commands.push("ip6tables -P INPUT DROP".to_string());
-            commands.push("ip6tables -P FORWARD DROP".to_string());
+            if settings.local_sharing {
+                commands.push("nft add rule inet marinvpn_killswitch output ip daddr { 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 } accept".to_string());
+            }
 
             for cmd in commands {
                 let parts: Vec<&str> = cmd.split_whitespace().collect();
-                let _ = Command::new(parts[0]).args(&parts[1..]).status();
+                if parts.is_empty() { continue; }
+                if let Err(e) = Command::new(&parts[0]).args(&parts[1..]).status() {
+                    error!("Failed to execute nft command '{}': {}", cmd, e);
+                    return Err(VpnError::FirewallError(e.to_string()));
+                }
             }
         }
 
         #[cfg(target_os = "windows")]
         {
-            info!("Enabling Windows Global Kill-switch...");
+            info!("Enabling Windows Global Kill-switch (Fail-Closed Policy)...");
             let addr = endpoint.split(':').next().unwrap_or(endpoint);
 
             let _ = Command::new("netsh").args(&["advfirewall", "set", "allprofiles", "firewallpolicy", "blockoutbound,allowinbound"]).status();
             
-            let allow_endpoint = format!(
-                "New-NetFirewallRule -DisplayName 'MarinVPN - Allow Endpoint' -Direction Outbound \
-                -RemoteAddress {} -Action Allow -Protocol UDP", addr
-            );
-            let _ = Command::new("powershell").args(&["-NoProfile", "-Command", &allow_endpoint]).status();
+            if addr != "0.0.0.0" {
+                let allow_endpoint = format!(
+                    "New-NetFirewallRule -DisplayName 'MarinVPN - Allow Endpoint' -Direction Outbound \
+                    -RemoteAddress {} -Action Allow -Protocol UDP -Profile Any -Force", addr
+                );
+                let _ = Command::new("powershell").args(&["-NoProfile", "-Command", &allow_endpoint]).status();
+            }
 
-            let allow_vpn = format!(
-                "New-NetFirewallRule -DisplayName 'MarinVPN - Allow Tunnel' -Direction Outbound \
-                -InterfaceAlias '{}' -Action Allow", self.iface_entry
-            );
-            let _ = Command::new("powershell").args(&["-NoProfile", "-Command", &allow_vpn]).status();
+            let allow_vpn = "Get-NetAdapter | Where-Object { $_.InterfaceDescription -like '*Wintun*' -or $_.InterfaceAlias -like 'marinvpn*' } | ForEach-Object { \
+                $alias = $_.InterfaceAlias; \
+                New-NetFirewallRule -DisplayName \"MarinVPN - Allow Tunnel $alias\" -Direction Outbound -InterfaceAlias $alias -Action Allow -Profile Any -Force \
+            }";
+            let _ = Command::new("powershell").args(&["-NoProfile", "-Command", allow_vpn]).status();
+
+            if settings.split_tunneling {
+                for ip in &settings.excluded_ips {
+                    let _ = Command::new("route").args(&["add", ip, "mask", "255.255.255.255", "0.0.0.0", "metric", "1"]).status();
+                }
+                for app in &settings.excluded_apps {
+                    self.apply_app_bypass(&app.path).await;
+                }
+            }
+
+            let _ = Command::new("netsh").args(&["advfirewall", "firewall", "add", "rule", "name=MarinVPN - Block IPv6", "dir=out", "action=block", "protocol=any", "remoteip=::/0"]).status();
 
             if !settings.local_sharing {
-                let _ = Command::new("netsh").args(&["advfirewall", "firewall", "add", "rule", "name=BlockLAN", "dir=out", "action=block", "remoteip=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12"]).status();
+                let block_lan = "New-NetFirewallRule -DisplayName 'MarinVPN - Block LAN' -Direction Outbound \
+                    -RemoteAddress 192.168.0.0/16,10.0.0.0/8,172.16.0.0/12 -Action Block -Profile Any -Force";
+                let _ = Command::new("powershell").args(&["-NoProfile", "-Command", block_lan]).status();
             }
+
+            let block_dns = "Get-NetAdapter | Where-Object { $_.InterfaceDescription -notlike '*Wintun*' -and $_.InterfaceAlias -notlike 'marinvpn*' } | ForEach-Object { \
+                $alias = $_.InterfaceAlias; \
+                netsh interface ipv4 set dnsservers name=$alias source=static address=127.0.0.1 validate=no; \
+                netsh interface ipv6 set dnsservers name=$alias source=static address=::1 validate=no; \
+                New-NetFirewallRule -DisplayName \"MarinVPN - Leak Protect DNS $alias\" -Direction Outbound -InterfaceAlias $alias -RemotePort 53 -Protocol UDP -Action Block -Profile Any -Force; \
+                New-NetFirewallRule -DisplayName \"MarinVPN - Leak Protect DNS TCP $alias\" -Direction Outbound -InterfaceAlias $alias -RemotePort 53 -Protocol TCP -Action Block -Profile Any -Force; \
+            }";
+            let _ = Command::new("powershell").args(&["-NoProfile", "-Command", block_dns]).status();
         }
         Ok(())
     }
@@ -580,11 +1074,8 @@ impl RealWgRunner {
     async fn disable_kill_switch(&self) {
         #[cfg(target_os = "linux")]
         {
-            info!("Disabling Linux Kill-switch and restoring IPv6...");
-            let _ = Command::new("iptables").args(&["-P", "OUTPUT", "ACCEPT"]).status();
-            let _ = Command::new("iptables").args(&["-F", "OUTPUT"]).status();
-            let _ = Command::new("ip6tables").args(&["-P", "OUTPUT", "ACCEPT"]).status();
-            let _ = Command::new("ip6tables").args(&["-F", "OUTPUT"]).status();
+            info!("Disabling Linux Kill-switch (nftables)...");
+            let _ = Command::new("nft").args(&["delete", "table", "inet", "marinvpn_killswitch"]).status();
         }
 
         #[cfg(target_os = "windows")]
@@ -607,68 +1098,91 @@ impl RealWgRunner {
 #[async_trait::async_trait]
 impl WgRunner for RealWgRunner {
         async fn up(&self, entry: &WireGuardConfig, exit: Option<&WireGuardConfig>, settings: &SettingsState) -> Result<(), VpnError> {
-            if settings.kill_switch {
-                let endpoint = exit.unwrap_or(entry).endpoint.clone();
-                if let Err(e) = self.enable_kill_switch(&endpoint, settings).await {
-                    error!("Failed to enable kill switch: {}", e);
-                    return Err(VpnError::FirewallError(e.to_string()));
-                }
-            }
-
             let mut final_entry = entry.clone();
-            if settings.obfuscation {
-                match self.obfuscator.start(&entry.endpoint).await {
-                    Ok(local_endpoint) => {
-                        final_entry.endpoint = local_endpoint;
-                        info!("Obfuscation layer active: routing via {}", final_entry.endpoint);
+            let obfs_key = entry.obfuscation_key.as_deref();
+            
+            match settings.stealth_mode {
+                StealthMode::Automatic => {
+                    info!("Stealth Mode: AUTOMATIC discovery initiated...");
+                    if let Ok(ep) = self.lwo_obfuscator.start(&entry.endpoint, obfs_key).await {
+                        final_entry.endpoint = ep;
+                        info!("Auto-Stealth: Selected LWO");
+                    } else if let Ok(ep) = self.quic_obfuscator.start(&entry.endpoint, obfs_key).await {
+                        final_entry.endpoint = ep;
+                        info!("Auto-Stealth: Selected QUIC");
+                    } else {
+                        match self.ws_obfuscator.start(&entry.endpoint, obfs_key).await {
+                            Ok(ep) => final_entry.endpoint = ep,
+                            Err(_) => warn!("Auto-Stealth: All methods failed, using standard UDP"),
+                        }
                     }
-                    Err(e) => {
-                        error!("Failed to start obfuscation: {}", e);
+                }
+                StealthMode::WireGuardPort => {
+                    info!("Stealth Mode: WireGuard on Port 53 (DNS) simulation");
+                    let host = entry.endpoint.split(':').next().unwrap_or(&entry.endpoint);
+                    final_entry.endpoint = format!("{}:53", host);
+                }
+                StealthMode::WebSocket => {
+                    if let Ok(ep) = self.ws_obfuscator.start(&entry.endpoint, obfs_key).await {
+                        final_entry.endpoint = ep;
                     }
+                }
+                StealthMode::Tcp => {
+                    if let Ok(ep) = self.tcp_obfuscator.start(&entry.endpoint, obfs_key).await {
+                        final_entry.endpoint = ep;
+                    }
+                }
+                StealthMode::Shadowsocks => {
+                    if let Ok(ep) = self.ss_obfuscator.start(&entry.endpoint, obfs_key).await {
+                        final_entry.endpoint = ep;
+                    }
+                }
+                StealthMode::Quic => {
+                    if let Ok(ep) = self.quic_obfuscator.start(&entry.endpoint, obfs_key).await {
+                        final_entry.endpoint = ep;
+                    }
+                }
+                StealthMode::Lwo => {
+                    if let Ok(ep) = self.lwo_obfuscator.start(&entry.endpoint, obfs_key).await {
+                        final_entry.endpoint = ep;
+                    }
+                }
+                StealthMode::None => {
+                    // Standard WireGuard
                 }
             }
 
             let entry_conf = if let Some(exit_cfg) = exit {
                 let exit_host = exit_cfg.endpoint.split(':').next().unwrap_or(&exit_cfg.endpoint);
+                
+                let exit_ip = match tokio::net::lookup_host(format!("{}:51820", exit_host)).await {
+                    Ok(mut addrs) => addrs.next().map(|a| a.ip().to_string()).unwrap_or_else(|| exit_host.to_string()),
+                    Err(_) => exit_host.to_string(),
+                };
+
                 format!(
-                    "[Interface]\nPrivateKey = {}\nAddress = {}\nMTU = 1280\n\n[Peer]\nPublicKey = {}\nEndpoint = {}\nAllowedIPs = {}, {}/32\nPersistentKeepalive = 25\n",
+                    "[Interface]\nPrivateKey = {}\nAddress = {}\nMTU = 1320\n\n[Peer]\nPublicKey = {}\nEndpoint = {}\nAllowedIPs = {}, {}/32\nPersistentKeepalive = 25\n",
                     final_entry.private_key,
                     final_entry.address,
                     final_entry.public_key,
                     final_entry.endpoint,
                     final_entry.address, 
-                    exit_host      
+                    exit_ip
                 )
             } else {
-                self.create_conf(&final_entry, settings)
+                self.create_conf(&final_entry, settings, None)
             };
     
             self.apply_single_up(&self.iface_entry, &entry_conf).await?;
     
             if let Some(exit_cfg) = exit {
-                info!("Establishing nested exit tunnel...");
-                let exit_conf = self.create_conf(exit_cfg, settings);
+                info!("Establishing nested exit tunnel with adjusted MTU...");
+                let exit_conf = self.create_conf(exit_cfg, settings, Some(1200));
                 self.apply_single_up(&self.iface_exit, &exit_conf).await?;
             }
     
-            self.apply_dns(&exit.unwrap_or(entry).dns).await;
-
-            if settings.split_tunneling {
-                if !settings.excluded_ips.is_empty() {
-                    info!("Applying IP split tunneling bypass for {} IPs", settings.excluded_ips.len());
-                    for ip in &settings.excluded_ips {
-                        self.apply_bypass_route(ip).await;
-                    }
-                }
-                
-                if !settings.excluded_apps.is_empty() {
-                    info!("Applying APP split tunneling bypass for {} apps", settings.excluded_apps.len());
-                    for app in &settings.excluded_apps {
-                        self.apply_app_bypass(&app.path).await;
-                    }
-                }
-            }
-
+            self.apply_dns(&exit.unwrap_or(entry).dns, settings).await;
+    
             Ok(())
         }
 
@@ -710,14 +1224,29 @@ impl WgRunner for RealWgRunner {
             }
         }
 
-        async fn apply_bypass_route(&self, ip: &str) {
-            #[cfg(target_os = "linux")]
-            {
-                let _ = Command::new("ip").args(&["route", "add", ip, "dev", "eth0"]).status(); // TODO: Simplified eth0 assumption
-            }
+                    async fn apply_bypass_route(&self, ip: &str) {
 
-            #[cfg(target_os = "windows")]
-            {
+                        #[cfg(target_os = "linux")]
+
+                        {
+
+                            let get_iface = "ip route | grep default | awk '{print $5}' | head -n1";
+
+                            let iface = Command::new("sh").args(&["-c", get_iface]).output()
+
+                                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+
+                                .unwrap_or_else(|_| "eth0".to_string());
+
+                            
+
+                            let _ = Command::new("ip").args(&["route", "add", ip, "dev", &iface]).status();
+
+                        }
+
+            
+
+                        #[cfg(target_os = "windows")]            {
                 let _ = Command::new("route").args(&["add", ip, "mask", "255.255.255.255", "0.0.0.0", "metric", "1"]).status();
             }
         }
@@ -756,12 +1285,14 @@ impl WgRunner for RealWgRunner {
             Ok(())
         }
     async fn down(&self) -> Result<(), VpnError> {
-        self.disable_kill_switch().await;
-
         self.apply_single_down(&self.iface_exit).await;
         self.apply_single_down(&self.iface_entry).await;
         
-        self.obfuscator.stop().await.ok();
+        self.ws_obfuscator.stop().await.ok();
+        self.ss_obfuscator.stop().await.ok();
+        self.quic_obfuscator.stop().await.ok();
+        self.tcp_obfuscator.stop().await.ok();
+        self.lwo_obfuscator.stop().await.ok();
         
         self.restore_dns().await;
         

@@ -52,24 +52,20 @@ impl ServersService {
             return Err("No servers found".to_string());
         }
 
-        // PERFORMANCE: Probe all candidates in parallel using tokio tasks
-        let mut futures = Vec::new();
+        use futures_util::stream::{StreamExt, FuturesUnordered};
+
+        let mut futures = FuturesUnordered::new();
         for server in candidates {
-            futures.push(tokio::spawn(async move {
+            futures.push(async move {
                 let latency = Self::measure_latency(&server.endpoint).await.unwrap_or(9999);
                 (server, latency)
-            }));
+            });
         }
 
-        let results = futures_util::future::join_all(futures).await;
-        
         let mut best_option: Option<(CommonVpnServer, u32)> = None;
-
-        for res in results {
-            if let Ok((server, latency)) = res {
-                if best_option.is_none() || latency < best_option.as_ref().unwrap().1 {
-                    best_option = Some((server, latency));
-                }
+        while let Some((server, latency)) = futures.next().await {
+            if best_option.is_none() || latency < best_option.as_ref().unwrap().1 {
+                best_option = Some((server, latency));
             }
         }
 

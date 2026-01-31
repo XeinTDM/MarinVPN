@@ -97,13 +97,34 @@ pub fn AppStateProvider(children: Element) -> Element {
         async move {
             while let Some(msg) = rx.next().await {
                 match msg {
-                    VpnAction::Connect(location) => {
+                    VpnAction::Connect(mut location) => {
                         let acc_num = account_number.peek().clone().unwrap_or_default();
                         let token = auth_token.peek().clone().unwrap_or_default();
                         if acc_num.is_empty() {
                             toasts.show("Please log in first", ToastType::Error);
                             continue;
                         }
+
+                        if location == "Automatic" || location.contains("Auto") {
+                            toasts.show("Finding best server...", ToastType::Info);
+                            let country = if location.contains(",") {
+                                location.split(',').next().map(|s| s.trim())
+                            } else {
+                                None
+                            };
+                            
+                            match ServersService::find_best_server(country).await {
+                                Ok(best) => {
+                                    location = format!("{}, {}", best.country, best.city);
+                                    current_location.set(location.clone());
+                                }
+                                Err(e) => {
+                                    toasts.show(&format!("Auto-select failed: {}", e), ToastType::Error);
+                                    continue;
+                                }
+                            }
+                        }
+
                         let s = settings.peek().clone();
                         match AuthService::get_anonymous_config(&location, &token, Some(s.dns_blocking.clone()), s.quantum_resistant).await {
                             Ok(config) => vpn_service.connect(location, config, None, s).await,
@@ -185,6 +206,15 @@ pub fn AppStateProvider(children: Element) -> Element {
                 }
             }
         }
+    });
+
+    let vpn_service_lockdown = vpn_service.clone();
+    use_effect(move || {
+        let s = settings();
+        let svc = vpn_service_lockdown.clone();
+        spawn(async move {
+            let _ = svc.apply_lockdown(&s).await;
+        });
     });
 
     use_context_provider(|| ConnectionState {

@@ -16,6 +16,9 @@ pub struct DatabaseSettings {
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthSettings {
     pub jwt_secret: String,
+    pub attestation_secret: String,
+    pub account_salt: String,
+    pub panic_key: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -36,6 +39,9 @@ impl Settings {
             .set_default("server.log_level", "info")?
             .set_default("database.url", "sqlite:marinvpn.db")?
             .set_default("auth.jwt_secret", "replace-with-a-real-secret-in-production")?
+            .set_default("auth.attestation_secret", "marinvpn_secure_attestation_2026_top_tier")?
+            .set_default("auth.account_salt", "marinvpn_default_salt_2026")?
+            .set_default("auth.panic_key", "emergency_default_2026")?
             // Load from file
             .add_source(File::with_name("config/default").required(false))
             .add_source(File::with_name(&format!("config/{}", run_mode)).required(false))

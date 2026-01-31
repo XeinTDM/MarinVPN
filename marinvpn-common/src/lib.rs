@@ -81,6 +81,7 @@ pub struct WireGuardConfig {
     pub pqc_handshake: Option<String>,
     pub pqc_provider: Option<String>,
     pub pqc_ciphertext: Option<String>,
+    pub obfuscation_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -174,6 +175,8 @@ pub enum ConnectionStatus {
 pub enum Protocol {
     #[default]
     WireGuard,
+    Shadowsocks,
+    Quic,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]

@@ -98,12 +98,10 @@ pub fn ConnectionOverlay() -> Element {
         div {
             class: "fixed left-0 right-0 px-4 z-[100] pointer-events-none",
             style: "bottom: 16px; width: {WINDOW_WIDTH}px;",
-            div { 
-                class: "pointer-events-auto flex flex-col items-start gap-1 mx-auto bg-card/60 backdrop-blur-xl border border-white/10 p-5 rounded-2xl shadow-2xl",
-                
+            div { class: "pointer-events-auto flex flex-col items-start gap-1 mx-auto bg-card/60 backdrop-blur-xl border border-white/10 p-5 rounded-2xl shadow-2xl",
+
                 // Status text
-                div { 
-                    class: "{status_color} text-xs font-bold uppercase tracking-wider mb-1",
+                div { class: "{status_color} text-xs font-bold uppercase tracking-wider mb-1",
                     {
                         match status {
                             ConnectionStatus::Connected => i18n.tr("connected"),
@@ -119,17 +117,25 @@ pub fn ConnectionOverlay() -> Element {
                     if settings.multi_hop {
                         div { class: "flex flex-col gap-0.5",
                             div { class: "flex items-center gap-2",
-                                span { class: "text-[10px] font-bold text-primary uppercase", "Entry" }
+                                span { class: "text-[10px] font-bold text-primary uppercase",
+                                    "Entry"
+                                }
                                 span { class: "text-sm font-bold", "{settings.entry_location}" }
                             }
                             div { class: "flex items-center gap-2",
-                                span { class: "text-[10px] font-bold text-status-success uppercase", "Exit" }
+                                span { class: "text-[10px] font-bold text-status-success uppercase",
+                                    "Exit"
+                                }
                                 span { class: "text-sm font-bold", "{settings.exit_location}" }
                             }
                         }
                     } else {
-                        div { class: "font-bold text-lg leading-tight", "{details.country}, {details.city}" }
-                        div { class: "text-[10px] text-muted-foreground font-medium uppercase tracking-widest", "{details.server_name}" }
+                        div { class: "font-bold text-lg leading-tight",
+                            "{details.country}, {details.city}"
+                        }
+                        div { class: "text-[10px] text-muted-foreground font-medium uppercase tracking-widest",
+                            "{details.server_name}"
+                        }
                     }
                 }
 
@@ -138,18 +144,17 @@ pub fn ConnectionOverlay() -> Element {
                     {
                         let limit = 4;
                         let show_more = features.len() > limit;
-                        let display_features: Vec<String> = if show_more { 
-                            features.iter().take(limit).cloned().collect() 
-                        } else { 
-                            features.clone() 
+                        let display_features: Vec<String> = if show_more {
+                            features.iter().take(limit).cloned().collect()
+                        } else {
+                            features.clone()
                         };
-                        
+
                         rsx! {
                             for feature in display_features {
-                                button { 
+                                button {
                                     class: "inline-block px-3 py-1.5 rounded-md bg-white/10 text-[10px] font-bold text-muted-foreground border border-white/5 leading-none hover:bg-white/20 transition-colors no-drag",
                                     onclick: move |_| {
-                                        // Simple mapping for scroll targets
                                         let target = match feature.as_str() {
                                             "DAITA" => "daita",
                                             "Quantum resistance" => "quantum-resistant",
@@ -158,9 +163,10 @@ pub fn ConnectionOverlay() -> Element {
                                             "Lockdown mode" => "lockdown-mode",
                                             "Obfuscation" => "obfuscation",
                                             "Local network sharing" => "local-sharing",
-                                            "Ads" | "Trackers" | "Malware" | "Gambling" | "Adult Content" | "Social Media" | "DNS content blockers" => "dns-blocking",
+                                            "Ads" | "Trackers" | "Malware" | "Gambling" | "Adult Content"
+                                            | "Social Media" | "DNS content blockers" => "dns-blocking",
                                             _ => "general",
-                                        };
+                                        }
                                         state.scroll_to.set(Some(target.to_string()));
                                         nav.push(Route::Settings {});
                                     },

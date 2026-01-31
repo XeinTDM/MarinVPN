@@ -269,43 +269,34 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                 SettingGap { height: 20, class: Some("!border-t-0".to_string()) }
             }
 
-            // Kill switch & Lockdown mode
-            div { class: "flex flex-col",
-                SettingRow {
-                    id: "kill-switch",
-                    label: i18n.tr("kill_switch").to_string(),
-                    show_info: true,
-                    oninfo: move |_| show_kill_switch_info.set(true),
-                    checked: s.kill_switch,
-                    onclick: move |_| {
-                        state.settings.with_mut(|s| s.kill_switch = !s.kill_switch);
-                    },
+                // Lockdown mode
+                div { class: "flex flex-col",
+                    SettingRow {
+                        id: "lockdown-mode",
+                        label: i18n.tr("lockdown_mode").to_string(),
+                        show_info: true,
+                        oninfo: move |_| show_lockdown_info.set(true),
+                        checked: s.lockdown_mode,
+                        onclick: move |_| {
+                            state.settings.with_mut(|s| s.lockdown_mode = !s.lockdown_mode);
+                        },
+                    }
+                    SettingDescription { text: "Blocks the Internet after you click on Disconnect or Quit. Always requires a VPN connection to reach the Internet.".to_string() }
+                    SettingGap { height: 17, class: Some("!border-t-0".to_string()) }
                 }
-                SettingRow {
-                    id: "lockdown-mode",
-                    label: i18n.tr("lockdown_mode").to_string(),
-                    show_info: true,
-                    oninfo: move |_| show_lockdown_info.set(true),
-                    checked: s.lockdown_mode,
-                    onclick: move |_| {
-                        state.settings.with_mut(|s| s.lockdown_mode = !s.lockdown_mode);
-                    },
-                }
-                SettingRow {
-                    label: "Traffic Padding (DAITA)".to_string(),
-                    checked: s.daita_enabled,
-                    onclick: move |_| {
-                        state.settings.with_mut(|s| s.daita_enabled = !s.daita_enabled);
-                    },
-                }
-                SettingGap { height: 17, class: Some("!border-t-0".to_string()) }
-            }
-
             // Anti-censorship
             div { class: "flex flex-col",
                 SettingAction {
                     label: i18n.tr("anti_censorship").to_string(),
-                    value: Some(i18n.tr("auto").to_string()),
+                    value: Some(match s.stealth_mode {
+                        crate::models::StealthMode::Automatic => "Automatic".to_string(),
+                        crate::models::StealthMode::WireGuardPort => "Port 53".to_string(),
+                        crate::models::StealthMode::Lwo => "LWO".to_string(),
+                        crate::models::StealthMode::Quic => "QUIC".to_string(),
+                        crate::models::StealthMode::Shadowsocks => "Shadowsocks".to_string(),
+                        crate::models::StealthMode::Tcp => "TCP".to_string(),
+                        crate::models::StealthMode::None => i18n.tr("none").to_string(),
+                    }),
                     onclick: move |_| {
                         nav.push(crate::Route::AntiCensorshipSettings {});
                     },

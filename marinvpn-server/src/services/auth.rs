@@ -2,13 +2,14 @@ use jsonwebtoken::{encode, decode, Header, Algorithm, Validation, EncodingKey, D
 use serde::{Deserialize, Serialize};
 use chrono::{Utc, Duration};
 use crate::error::{AppResult, AppError};
-use rsa::{RsaPrivateKey, pkcs8::EncodePublicKey, BigUint};
-use rsa::traits::{PublicKeyParts, PrivateKeyParts};
+use rsa::{RsaPrivateKey, pkcs8::{EncodePublicKey, DecodePrivateKey, EncodePrivateKey, LineEnding}, BigUint, traits::{PublicKeyParts, PrivateKeyParts}};
 use base64::Engine;
+use sha2::{Sha256, Digest};
+use std::fs;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String, // account_number
+    pub sub: String,
     pub exp: usize,
 }
 
@@ -18,8 +19,23 @@ pub struct BlindSigner {
 
 impl BlindSigner {
     pub fn new() -> Self {
+        let key_path = "blind_signer.pem";
+        
+        if let Ok(pem) = fs::read_to_string(key_path) {
+            if let Ok(key) = RsaPrivateKey::from_pkcs8_pem(&pem) {
+                tracing::info!("Loaded existing Blind Signer RSA key from {}", key_path);
+                return Self { key };
+            }
+        }
+
         let mut rng = rand::thread_rng();
-        let key = RsaPrivateKey::new(&mut rng, 2048).expect("failed to generate RSA key");
+        let key = RsaPrivateKey::new(&mut rng, 4096).expect("failed to generate 4096-bit RSA key");
+        
+        if let Ok(pem) = key.to_pkcs8_pem(LineEnding::LF) {
+            let _ = fs::write(key_path, pem.as_bytes());
+            tracing::info!("Generated and saved new Blind Signer RSA key to {}", key_path);
+        }
+
         Self { key }
     }
 
@@ -30,18 +46,16 @@ impl BlindSigner {
     pub fn sign_blinded(&self, blinded_message_base64: &str) -> AppResult<String> {
         let blinded_bytes = base64::engine::general_purpose::STANDARD
             .decode(blinded_message_base64)
-            .map_err(|_| AppError::BadRequest("Invalid base64 in blinded message".to_string()))?;
+            .map_err(|_| AppError::BadRequest("Invalid base64".to_string()))?;
         
         let m = BigUint::from_bytes_be(&blinded_bytes);
-        
-        // RSA Blind Signing: s' = (m')^d mod n
         let s_prime = m.modpow(self.key.d(), self.key.n());
         
         Ok(base64::engine::general_purpose::STANDARD.encode(s_prime.to_bytes_be()))
     }
 
     pub fn verify(&self, message_base64: &str, signature_base64: &str) -> bool {
-        let m_bytes = match base64::engine::general_purpose::STANDARD.decode(message_base64) {
+        let m_raw = match base64::engine::general_purpose::STANDARD.decode(message_base64) {
             Ok(b) => b,
             Err(_) => return false,
         };
@@ -50,12 +64,14 @@ impl BlindSigner {
             Err(_) => return false,
         };
 
-        let m = BigUint::from_bytes_be(&m_bytes);
+        let mut hasher = Sha256::new();
+        hasher.update(&m_raw);
+        let hashed_m = BigUint::from_bytes_be(&hasher.finalize());
+
         let s = BigUint::from_bytes_be(&s_bytes);
-        
-        // Verification: s^e mod n == m
         let m_check = s.modpow(self.key.e(), self.key.n());
-        m_check == m
+        
+        m_check == hashed_m
     }
 }
 
