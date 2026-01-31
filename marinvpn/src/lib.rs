@@ -101,10 +101,8 @@ pub fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: asset!("/assets/tailwind.css") }
-        ToastProvider { 
-            AppStateProvider {
-                AppContent {}
-            }
+        ToastProvider {
+            AppStateProvider { AppContent {} }
         }
     }
 }
@@ -125,8 +123,7 @@ fn AppContent() -> Element {
     });
 
     rsx! {
-        div {
-            class: if dark_mode { "dark" },
+        div { class: if dark_mode { "dark" },
             div {
                 class: "bg-background text-foreground transition-colors duration-300",
                 style: "height: {WINDOW_HEIGHT}px; width: {WINDOW_WIDTH}px; position: relative; display: flex; flex-direction: column; overflow: hidden;",
@@ -137,7 +134,6 @@ fn AppContent() -> Element {
 }
 
 pub fn run_app() {
-    // Initialize logging
     tracing_subscriber::fmt::init();
 
     let config = Config::new()

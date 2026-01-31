@@ -24,14 +24,12 @@ pub fn use_tray_management() {
     let window = use_window();
     let last_focus_lost = use_hook(|| Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1))));
 
-    // Tooltip update channel - Wrapped in Arc<Mutex> to satisfy Clone for use_hook
     let rx_holder = use_hook(|| {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let _ = TRAY_UPDATE_SENDER.set(tx);
         Arc::new(Mutex::new(Some(rx)))
     });
 
-    // Hide window when it loses focus
     let last_focus_handler = last_focus_lost.clone();
     let window_handler = window.clone();
     use_wry_event_handler(move |event, _| {
@@ -45,9 +43,7 @@ pub fn use_tray_management() {
 
     let window_coroutine = window.clone();
     let last_focus_coroutine = last_focus_lost.clone();
-    
-    // Tray event loop and icon lifecycle
-    // Using spawn_local to keep non-Send TrayIcon on the main thread
+
     let rx_holder_spawn = rx_holder.clone();
     use_hook(move || {
         spawn(async move {
@@ -60,17 +56,13 @@ pub fn use_tray_management() {
             };
             let tray_channel = TrayIconEvent::receiver();
             let mut last_click = Instant::now();
-            
-            // Get the receiver out of the mutex
-            // Safe to unwrap here as this closure runs once
+
             let mut rx = rx_holder_spawn.lock().unwrap().take().unwrap_or_else(|| {
-                // Should not happen unless spawned multiple times
                 let (_, rx) = tokio::sync::mpsc::unbounded_channel();
                 rx
             });
             
             loop {
-                // Handle Tray Events
                 while let Ok(event) = tray_channel.try_recv() {
                     match event {
                         TrayIconEvent::Click { rect, .. } => {
@@ -100,7 +92,6 @@ pub fn use_tray_management() {
                     }
                 }
 
-                // Handle Tooltip Updates
                 while let Ok(tooltip) = rx.try_recv() {
                     let _ = tray.set_tooltip(Some(tooltip));
                 }
@@ -118,11 +109,9 @@ fn position_window_at_tray(window: &dioxus::desktop::DesktopContext, rect: Rect)
         let h = WINDOW_HEIGHT * scale_factor;
         let margin_y = 60.0 * scale_factor;
 
-        // Center window horizontally over the tray icon center
         let icon_center_x = rect.position.x as f64 + (rect.size.width as f64 / 2.0);
         let x = icon_center_x - (w / 2.0);
 
-        // Position above the tray area (monitor bottom - height - margin)
         let monitor_pos = monitor.position();
         let monitor_size = monitor.size();
         let y = (monitor_pos.y as f64 + monitor_size.height as f64) - h - margin_y;

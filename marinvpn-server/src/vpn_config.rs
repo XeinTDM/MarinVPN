@@ -15,9 +15,13 @@ pub fn get_config_for_location(location: &str) -> WireGuardConfig {
     WireGuardConfig {
         private_key: "".to_string(),
         public_key: "SERVER_PUBLIC_KEY_FOR_PEER".to_string(),
+        preshared_key: None,
         endpoint: endpoint.to_string(),
         allowed_ips: "0.0.0.0/0, ::/0".to_string(),
         address: "10.0.0.2/32, fc00::2/128".to_string(),
         dns: Some("1.1.1.1".to_string()),
+        pqc_handshake: None,
+        pqc_provider: None,
+        pqc_ciphertext: None,
     }
 }

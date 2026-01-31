@@ -9,7 +9,6 @@ pub struct VpnOrchestrator {
 
 impl VpnOrchestrator {
     pub fn new(interface: String) -> Self {
-        // Check if wg command exists
         let mock_mode = Command::new("wg").arg("--version").output().is_err();
         if mock_mode {
             warn!("'wg' command not found. VpnOrchestrator running in MOCK mode.");
@@ -24,7 +23,6 @@ impl VpnOrchestrator {
             return Ok(());
         }
 
-        // Strip /32 from IP if present for wg set command
         let ip_only = allowed_ip.split('/').next().unwrap_or(allowed_ip);
 
         info!("Registering peer {} with IP {} on {}", pub_key, ip_only, self.interface);

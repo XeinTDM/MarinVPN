@@ -21,7 +21,7 @@ mod tests {
             use validator::Validate;
             
             let req = LoginRequest {
-                account_number: "1234".to_string(), // Too short
+                account_number: "1234".to_string(),
                 device_name: None,
             };
             assert!(req.validate().is_err());

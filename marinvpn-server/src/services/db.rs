@@ -13,8 +13,10 @@ pub struct Database {
 
 impl Database {
     fn hash_account(account_number: &str) -> String {
+        let salt = std::env::var("ACCOUNT_SALT").unwrap_or_else(|_| "marinvpn_default_salt_2026".to_string());
         let mut hasher = Sha256::new();
         hasher.update(account_number.as_bytes());
+        hasher.update(salt.as_bytes());
         hex::encode(hasher.finalize())
     }
 
@@ -25,7 +27,6 @@ impl Database {
             .idle_timeout(std::time::Duration::from_secs(600))
             .connect(url).await?;
         
-        // PERFORMANCE: Enable WAL mode for significantly better write concurrency
         sqlx::query("PRAGMA journal_mode=WAL;").execute(&pool).await?;
         sqlx::query("PRAGMA synchronous=NORMAL;").execute(&pool).await?;
 
@@ -35,11 +36,29 @@ impl Database {
 
         sqlx::migrate!("./migrations").run(&pool).await?;
         
-        // Initialize ephemeral schema
         sqlx::query("CREATE TABLE IF NOT EXISTS peers (id INTEGER PRIMARY KEY, pub_key TEXT UNIQUE, assigned_ip TEXT UNIQUE)")
+            .execute(&ephemeral_pool).await?;
+        
+        sqlx::query("CREATE TABLE IF NOT EXISTS used_tokens (message TEXT PRIMARY KEY, used_at INTEGER)")
             .execute(&ephemeral_pool).await?;
 
         Ok(Self { pool, ephemeral_pool })
+    }
+
+    pub async fn is_token_used(&self, message: &str) -> AppResult<bool> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT message FROM used_tokens WHERE message = ?")
+            .bind(message)
+            .fetch_optional(&self.ephemeral_pool).await?;
+        Ok(row.is_some())
+    }
+
+    pub async fn mark_token_used(&self, message: &str) -> AppResult<()> {
+        let now = Utc::now().timestamp();
+        sqlx::query("INSERT INTO used_tokens (message, used_at) VALUES (?, ?)")
+            .bind(message)
+            .bind(now)
+            .execute(&self.ephemeral_pool).await?;
+        Ok(())
     }
 
     pub async fn create_account(&self, account_number: &str, expiry_days: i64) -> AppResult<Account> {
@@ -110,10 +129,10 @@ impl Database {
         Ok(res.rows_affected() > 0)
     }
 
-    pub async fn get_server_by_location(&self, country: &str) -> AppResult<Option<VpnServer>> {
-        Ok(sqlx::query_as::<_, VpnServer>("SELECT * FROM vpn_servers WHERE country = ? AND is_active = 1 LIMIT 1")
+    pub async fn get_servers_by_location(&self, country: &str) -> AppResult<Vec<VpnServer>> {
+        Ok(sqlx::query_as::<_, VpnServer>("SELECT * FROM vpn_servers WHERE country = ? AND is_active = 1")
             .bind(country)
-            .fetch_optional(&self.pool).await?)
+            .fetch_all(&self.pool).await?)
     }
 
     pub async fn get_active_servers(&self) -> AppResult<Vec<VpnServer>> {
@@ -152,5 +171,12 @@ impl Database {
 
         tx.commit().await?;
         Ok(assigned_ip)
+    }
+
+    pub async fn panic_wipe(&self) -> AppResult<()> {
+        info!("CRITICAL: Panic wipe triggered. Clearing all ephemeral data.");
+        sqlx::query("DELETE FROM peers").execute(&self.ephemeral_pool).await?;
+        sqlx::query("DELETE FROM used_tokens").execute(&self.ephemeral_pool).await?;
+        Ok(())
     }
 }

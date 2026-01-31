@@ -12,7 +12,6 @@ pub fn MainLayout() -> Element {
     let nav = use_navigator();
     let i18n = crate::hooks::use_i18n();
     
-    // Redirect to login if not authenticated
     use_effect(move || {
         if (state.account_number)().is_none() {
             nav.replace(Route::Login {});

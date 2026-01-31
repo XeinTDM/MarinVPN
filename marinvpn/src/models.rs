@@ -1,6 +1,5 @@
 use serde::{Serialize, Deserialize};
 
-// Re-export common types
 pub use marinvpn_common::{
     Account, Device, WireGuardConfig, ConnectionStatus, Protocol, 
     DnsBlockingState, IpVersion, LoginRequest, LoginResponse, 

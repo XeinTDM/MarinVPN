@@ -30,7 +30,6 @@ pub fn DashboardMap(regions: Vec<Region>, country: String, status: ConnectionSta
 
     let mut current_view = use_signal(|| target_view);
 
-    // Reactively update the view when target_view changes
     use_effect(move || {
         let target = target_view;
         spawn(async move {
@@ -84,11 +83,14 @@ pub fn DashboardMap(regions: Vec<Region>, country: String, status: ConnectionSta
                     if let Some(region) = active_region {
                         if settings.multi_hop {
                             {
-                                let entry_info = crate::models::LocationInfo::from_string(&settings.entry_location);
-                                let exit_info = crate::models::LocationInfo::from_string(&settings.exit_location);
+                                let entry_info = crate::models::LocationInfo::from_string(
+                                    &settings.entry_location,
+                                );
+                                let exit_info = crate::models::LocationInfo::from_string(
+                                    &settings.exit_location,
+                                );
                                 let entry_region = regions.iter().find(|r| r.name == entry_info.country);
                                 let exit_region = regions.iter().find(|r| r.name == exit_info.country);
-
                                 if let (Some(en), Some(ex)) = (entry_region, exit_region) {
                                     rsx! {
                                         line {
@@ -109,7 +111,7 @@ pub fn DashboardMap(regions: Vec<Region>, country: String, status: ConnectionSta
                                         }
                                     }
                                 } else {
-                                    rsx! { }
+                                    rsx! {}
                                 }
                             }
                         } else {

@@ -42,17 +42,13 @@ impl ToastManager {
         spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
             
-            // Mark for closing
             toasts.with_mut(|t| {
                 if let Some(toast) = t.iter_mut().find(|t| t.id == id) {
                     toast.is_closing = true;
                 }
             });
 
-            // Wait for animation
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            
-            // Remove
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await; 
             toasts.write().retain(|t| t.id != id);
         });
     }
@@ -72,17 +68,23 @@ pub fn ToastProvider(children: Element) -> Element {
     rsx! {
         div { class: "contents",
             {children}
-            
+
             div { class: "absolute bottom-24 left-0 right-0 flex flex-col items-center gap-2 pointer-events-none z-[100]",
                 for toast in toasts() {
-                    div { 
+                    div {
                         key: "{toast.id}",
                         class: "pointer-events-auto bg-card border border-border text-foreground px-4 py-3 rounded-2xl shadow-xl flex items-center gap-3 transition-all duration-300",
                         class: if toast.is_closing { "opacity-0 translate-y-2 scale-95" } else { "animate-in slide-in-from-bottom-2 fade-in" },
                         match toast.type_ {
-                            ToastType::Info => rsx! { Info { size: 18, class: Some("text-status-info".to_string()) } },
-                            ToastType::Success => rsx! { CircleCheck { size: 18, class: Some("text-status-success".to_string()) } },
-                            ToastType::Error => rsx! { CircleAlert { size: 18, class: Some("text-status-error".to_string()) } },
+                            ToastType::Info => rsx! {
+                                Info { size: 18, class: Some("text-status-info".to_string()) }
+                            },
+                            ToastType::Success => rsx! {
+                                CircleCheck { size: 18, class: Some("text-status-success".to_string()) }
+                            },
+                            ToastType::Error => rsx! {
+                                CircleAlert { size: 18, class: Some("text-status-error".to_string()) }
+                            },
                         }
                         span { class: "text-sm font-medium", "{toast.message}" }
                     }

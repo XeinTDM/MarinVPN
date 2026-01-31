@@ -23,10 +23,17 @@ pub mod services;
 pub mod vpn_config;
 pub mod config;
 
+use marinvpn_common::{
+    Account, Device, VpnServer, LoginRequest, ConfigRequest, AnonymousConfigRequest,
+    BlindTokenRequest, RemoveDeviceRequest, ReportRequest, LoginResponse,
+    GenerateResponse, BlindTokenResponse, ErrorResponse, WireGuardConfig
+};
+
 pub struct AppState {
     pub db: services::db::Database,
     pub settings: config::Settings,
     pub vpn: services::vpn::VpnOrchestrator,
+    pub signer: services::auth::BlindSigner,
 }
 
 #[derive(OpenApi)]
@@ -36,22 +43,28 @@ pub struct AppState {
         handlers::auth::login,
         handlers::auth::get_devices,
         handlers::auth::remove_device,
+        handlers::auth::get_blind_public_key,
+        handlers::auth::issue_blind_token,
         handlers::vpn::get_vpn_config,
+        handlers::vpn::get_anonymous_config,
         handlers::vpn::report_problem,
     ),
     components(
         schemas(
-            models::Account,
-            models::Device,
-            models::VpnServer,
-            models::requests::LoginRequest,
-            models::requests::ConfigRequest,
-            models::requests::RemoveDeviceRequest,
-            models::requests::ReportRequest,
-            models::responses::LoginResponse,
-            models::responses::GenerateResponse,
-            models::responses::ErrorResponse,
-            vpn_config::WireGuardConfig,
+            Account,
+            Device,
+            VpnServer,
+            LoginRequest,
+            ConfigRequest,
+            AnonymousConfigRequest,
+            BlindTokenRequest,
+            RemoveDeviceRequest,
+            ReportRequest,
+            LoginResponse,
+            GenerateResponse,
+            BlindTokenResponse,
+            ErrorResponse,
+            WireGuardConfig,
         )
     ),
     tags(
@@ -72,13 +85,15 @@ pub async fn run() {
         .init();
 
     let db = services::db::Database::new(&settings.database.url).await.expect("Failed to initialize database");
-    let vpn_iface = std::env::var("WG_INTERFACE").unwrap_or_else(|_| "wg0".to_string());
+    let vpn_iface = std::env::var("WG_INTERFACE").unwrap_or_else(|_| "marinvpn0".to_string());
     let vpn_orchestrator = services::vpn::VpnOrchestrator::new(vpn_iface);
+    let signer = services::auth::BlindSigner::new();
 
     let state = Arc::new(AppState { 
         db, 
         settings: settings.clone(),
         vpn: vpn_orchestrator,
+        signer,
     });
 
     let (prometheus_layer, metric_handle) = PrometheusMetricLayer::pair();
@@ -128,9 +143,13 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/account/login", post(handlers::auth::login))
         .route("/account/devices", post(handlers::auth::get_devices))
         .route("/account/devices/remove", post(handlers::auth::remove_device))
+        .route("/auth/blind-key", get(handlers::auth::get_blind_public_key))
+        .route("/auth/issue-token", post(handlers::auth::issue_blind_token))
         .route("/vpn/servers", get(handlers::vpn::get_servers))
         .route("/vpn/config", post(handlers::vpn::get_vpn_config))
+        .route("/vpn/config-anonymous", post(handlers::vpn::get_anonymous_config))
         .route("/vpn/report", post(handlers::vpn::report_problem))
+        .route("/vpn/panic", post(handlers::vpn::trigger_panic))
 }
 
 async fn health_check() -> &'static str {

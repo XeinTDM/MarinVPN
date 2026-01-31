@@ -105,7 +105,7 @@ pub fn AppStateProvider(children: Element) -> Element {
                             continue;
                         }
                         let s = settings.peek().clone();
-                        match AuthService::get_config(&acc_num, &location, &token, Some(s.dns_blocking), s.quantum_resistant).await {
+                        match AuthService::get_anonymous_config(&location, &token, Some(s.dns_blocking.clone()), s.quantum_resistant).await {
                             Ok(config) => vpn_service.connect(location, config, None, s).await,
                             Err(e) => toasts.show(&format!("Config error: {}", e), ToastType::Error),
                         }
@@ -118,8 +118,8 @@ pub fn AppStateProvider(children: Element) -> Element {
                             continue;
                         }
                         let s = settings.peek().clone();
-                        let entry_fut = AuthService::get_config(&acc_num, &entry, &token, Some(s.dns_blocking), s.quantum_resistant);
-                        let exit_fut = AuthService::get_config(&acc_num, &exit, &token, Some(s.dns_blocking), s.quantum_resistant);
+                        let entry_fut = AuthService::get_anonymous_config(&entry, &token, Some(s.dns_blocking.clone()), s.quantum_resistant);
+                        let exit_fut = AuthService::get_anonymous_config(&exit, &token, Some(s.dns_blocking.clone()), s.quantum_resistant);
                         match tokio::join!(entry_fut, exit_fut) {
                             (Ok(e_cfg), Ok(x_cfg)) => vpn_service.connect(entry, e_cfg, Some((exit, x_cfg)), s).await,
                             _ => toasts.show("Failed to fetch Multi-hop configs", ToastType::Error),
@@ -150,7 +150,6 @@ pub fn AppStateProvider(children: Element) -> Element {
         }
     });
 
-    // Listen to VPN Service Events
     let vpn_service_listener = vpn_service.clone();
     use_coroutine(move |_: UnboundedReceiver<()>| {
         let mut rx = vpn_service_listener.subscribe();
@@ -178,6 +177,11 @@ pub fn AppStateProvider(children: Element) -> Element {
                         upload_speed.set(stats.upload_speed);
                     }
                     VpnEvent::Error(err) => toasts.show(&err.to_string(), ToastType::Error),
+                    VpnEvent::CaptivePortalActive(active) => {
+                        if active {
+                            toasts.show("Captive Portal Detected. Firewall temporarily disabled.", ToastType::Info);
+                        }
+                    }
                 }
             }
         }
@@ -188,5 +192,8 @@ pub fn AppStateProvider(children: Element) -> Element {
         connected_since, favorites, scroll_to, download_speed, upload_speed, device_name, vpn_action,
     });
     
-    rsx! { {children} }
+    rsx! {
+        {children}
+
+    }
 }

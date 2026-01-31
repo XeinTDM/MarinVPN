@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use crate::models::{ConnectionStatus, WireGuardConfig, SettingsState};
-use tracing::{info, error};
+use tracing::{info, error, warn};
 use rand::Rng;
 use std::net::{TcpStream, SocketAddr};
 use std::time::Duration;
@@ -68,7 +68,10 @@ trait WgRunner: Send + Sync {
     async fn up(&self, entry: &WireGuardConfig, exit: Option<&WireGuardConfig>, settings: &SettingsState) -> Result<(), VpnError>;
     async fn down(&self) -> Result<(), VpnError>;
     async fn get_stats(&self) -> Result<VpnStats, VpnError>;
-    async fn enable_obfuscation(&self, enabled: bool) -> Result<(), VpnError>;
+    async fn apply_app_bypass(&self, app_path: &str);
+    async fn apply_bypass_route(&self, ip: &str);
+    async fn apply_single_up(&self, iface: &str, conf: &str) -> Result<(), VpnError>;
+    async fn apply_single_down(&self, iface: &str);
 }
 
 #[derive(Clone)]
@@ -79,6 +82,7 @@ struct ConnectionContext {
     settings: SettingsState,
 }
 
+#[derive(Clone)]
 pub struct WireGuardService {
     event_tx: broadcast::Sender<VpnEvent>,
     current_status: Arc<Mutex<ConnectionStatus>>,
@@ -89,7 +93,13 @@ pub struct WireGuardService {
 impl WireGuardService {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(100);
-        let runner: Box<dyn WgRunner> = Box::new(RealWgRunner::new());
+        
+        let runner: Box<dyn WgRunner> = if std::env::var("MARIN_MOCK").is_ok() {
+            info!("Initializing VPN Service in MOCK/SIMULATION mode.");
+            Box::new(SimulationRunner::new())
+        } else {
+            Box::new(RealWgRunner::new())
+        };
 
         Self {
             event_tx: tx,
@@ -135,9 +145,12 @@ impl WireGuardService {
         let runner = self.runner.clone();
         let svc = self.clone();
         
+        if settings.daita_enabled {
+            self.start_daita_task(status_lock.clone());
+        }
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
-            let mut last_dl = 0;
             loop {
                 interval.tick().await;
                 if *status_lock.lock().await != ConnectionStatus::Connected {
@@ -146,24 +159,6 @@ impl WireGuardService {
                 if let Ok(stats) = runner.get_stats().await {
                     let _ = tx.send(VpnEvent::StatsUpdated(stats.clone()));
                     
-                    if settings.daita_enabled && stats.total_download == last_dl {
-                        tokio::spawn(async move {
-                            let mut rng = rand::thread_rng();
-                            let targets = ["1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53", "208.67.222.222:53"];
-                            let target = targets[rng.gen_range(0..targets.len())];
-                            
-                            // Random sleep to avoid periodic patterns
-                            tokio::time::sleep(Duration::from_millis(rng.gen_range(50..500))).await;
-
-                            let _ = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|s| {
-                                let size = rng.gen_range(32..256);
-                                let noise: Vec<u8> = (0..size).map(|_| rng.gen()).collect();
-                                s.send_to(&noise, target)
-                            });
-                        });
-                    }
-                    last_dl = stats.total_download;
-
                     if stats.latest_handshake > 0 {
                         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
                         if now.saturating_sub(stats.latest_handshake) > 180 {
@@ -186,6 +181,57 @@ impl WireGuardService {
             }
         });
     }
+
+    fn start_daita_task(&self, status_lock: Arc<Mutex<ConnectionStatus>>) {
+        tokio::spawn(async move {
+            info!("Daita: Advanced Traffic Anonymization active.");
+            let targets = ["1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53", "208.67.222.222:53", "8.8.4.4:53"];
+            
+            loop {
+                // Check status without holding rng across await
+                let is_connected = *status_lock.lock().await == ConnectionStatus::Connected;
+                if !is_connected {
+                    break;
+                }
+
+                let (size, count, delay_ms) = {
+                    let mut rng = rand::thread_rng();
+                    let traffic_type = rng.gen_range(0..100);
+                    if traffic_type < 70 {
+                        (rng.gen_range(32..128), 1, rng.gen_range(500..2000))
+                    } else if traffic_type < 95 {
+                        (rng.gen_range(512..1200), rng.gen_range(2..5), rng.gen_range(3000..8000))
+                    } else {
+                        (rng.gen_range(1200..1400), 10, rng.gen_range(10000..20000))
+                    }
+                };
+
+                for _ in 0..count {
+                    let target = {
+                        let mut rng = rand::thread_rng();
+                        targets[rng.gen_range(0..targets.len())]
+                    };
+                    let noise: Vec<u8> = {
+                        let mut rng = rand::thread_rng();
+                        (0..size).map(|_| rng.gen()).collect()
+                    };
+                    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                        let _ = socket.send_to(&noise, target);
+                    }
+                    if count > 1 {
+                        let sleep_time = {
+                            let mut rng = rand::thread_rng();
+                            rng.gen_range(10..100)
+                        };
+                        tokio::time::sleep(Duration::from_millis(sleep_time)).await;
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            info!("Daita: Task terminated.");
+        });
+    }
 }
 
 #[async_trait::async_trait]
@@ -206,7 +252,6 @@ impl VpnService for WireGuardService {
             }
         }
 
-        // Save context for auto-reconnect
         {
             let mut lock = self.active_context.lock().await;
             *lock = Some(ConnectionContext {
@@ -251,7 +296,6 @@ impl VpnService for WireGuardService {
             return;
         }
 
-        // Clear context
         {
             let mut lock = self.active_context.lock().await;
             *lock = None;
@@ -281,13 +325,12 @@ impl VpnService for WireGuardService {
         tokio::spawn(async move {
             info!("Captive Portal Mode: Temporarily disabling firewall for {}s", duration_secs);
             let _ = tx.send(VpnEvent::CaptivePortalActive(true));
-            runner.down().await.ok(); // Temporarily drop tunnel and firewall
+            runner.down().await.ok();
             
             tokio::time::sleep(Duration::from_secs(duration_secs)).await;
             
             info!("Captive Portal Mode: Restoring firewall...");
             let _ = tx.send(VpnEvent::CaptivePortalActive(false));
-            // User will need to manually reconnect or auto-connect will kick in
         });
     }
 }
@@ -338,8 +381,14 @@ impl WgRunner for SimulationRunner {
             upload_speed: ul_speed, 
             total_download: state.total_download,
             total_upload: state.total_upload,
+            latest_handshake: 0,
         })
     }
+
+    async fn apply_app_bypass(&self, _app_path: &str) {}
+    async fn apply_bypass_route(&self, _ip: &str) {}
+    async fn apply_single_up(&self, _iface: &str, _conf: &str) -> Result<(), VpnError> { Ok(()) }
+    async fn apply_single_down(&self, _iface: &str) {}
 }
 
 struct RunnerState {
@@ -378,7 +427,6 @@ struct RealWgRunner {
 
 impl RealWgRunner {
     fn new() -> Self {
-        // Verify tools presence on startup
         let wg_present = Command::new("wg").arg("--version").output().is_ok();
         if !wg_present {
             warn!("'wg' tool not detected. VPN operations will likely fail.");
@@ -398,7 +446,6 @@ impl RealWgRunner {
 
     fn create_conf(&self, config: &WireGuardConfig, settings: &SettingsState) -> String {
         let mtu = if settings.mtu == 0 || settings.mtu == 1420 {
-            // Default to 1280 (the minimum for IPv6/WG) if we suspect a restrictive network
             1280
         } else {
             settings.mtu
@@ -416,7 +463,7 @@ impl RealWgRunner {
         }
 
         format!(
-            "[Interface]\nPrivateKey = {}\nAddress = {}\nMTU = {}\n{}\n\n{}",
+            "[Interface]\nPrivateKey = {}\nAddress = {}\nMTU = {}\n{}\n\n{}\n",
             config.private_key,
             config.address,
             mtu,
@@ -445,12 +492,10 @@ impl RealWgRunner {
             let first_dns = dns_servers.split(',').next().unwrap_or("1.1.1.1").trim();
             info!("Applying Windows DNS: {} to interface {}", first_dns, self.iface_entry);
             
-            // Set primary DNS
             let _ = Command::new("netsh")
                 .args(&["interface", "ipv4", "set", "dns", "name=", &self.iface_entry, "static", first_dns])
                 .status();
             
-            // Add secondary if exists
             if let Some(second_dns) = dns_servers.split(',').nth(1) {
                 let _ = Command::new("netsh")
                     .args(&["interface", "ipv4", "add", "dns", "name=", &self.iface_entry, second_dns.trim(), "index=2"])
@@ -511,17 +556,14 @@ impl RealWgRunner {
             info!("Enabling Windows Global Kill-switch...");
             let addr = endpoint.split(':').next().unwrap_or(endpoint);
 
-            // 1. Block all outbound by default
             let _ = Command::new("netsh").args(&["advfirewall", "set", "allprofiles", "firewallpolicy", "blockoutbound,allowinbound"]).status();
             
-            // 2. Allow traffic to the VPN endpoint
             let allow_endpoint = format!(
                 "New-NetFirewallRule -DisplayName 'MarinVPN - Allow Endpoint' -Direction Outbound \
                 -RemoteAddress {} -Action Allow -Protocol UDP", addr
             );
             let _ = Command::new("powershell").args(&["-NoProfile", "-Command", &allow_endpoint]).status();
 
-            // 3. Allow traffic on the VPN interface itself
             let allow_vpn = format!(
                 "New-NetFirewallRule -DisplayName 'MarinVPN - Allow Tunnel' -Direction Outbound \
                 -InterfaceAlias '{}' -Action Allow", self.iface_entry
@@ -671,13 +713,11 @@ impl WgRunner for RealWgRunner {
         async fn apply_bypass_route(&self, ip: &str) {
             #[cfg(target_os = "linux")]
             {
-                // On Linux, we use the 'main' routing table to bypass the VPN table created by wg-quick
-                let _ = Command::new("ip").args(&["route", "add", ip, "dev", "eth0"]).status(); // Simplified eth0 assumption
+                let _ = Command::new("ip").args(&["route", "add", ip, "dev", "eth0"]).status(); // TODO: Simplified eth0 assumption
             }
 
             #[cfg(target_os = "windows")]
             {
-                // On Windows, we find the default gateway and add a specific route
                 let _ = Command::new("route").args(&["add", ip, "mask", "255.255.255.255", "0.0.0.0", "metric", "1"]).status();
             }
         }
@@ -729,15 +769,6 @@ impl WgRunner for RealWgRunner {
         state.last_stats = None;
         state.last_check = None;
         
-        Ok(())
-    }
-
-    async fn enable_obfuscation(&self, enabled: bool) -> Result<(), VpnError> {
-        if enabled {
-            info!("Stealth Mode: Activating UDP-over-TCP obfuscation placeholder...");
-            // In a real implementation, we would start a local socks5/tcp proxy here
-            // e.g. wstunnel -L udp://127.0.0.1:51820:remote:51820
-        }
         Ok(())
     }
 

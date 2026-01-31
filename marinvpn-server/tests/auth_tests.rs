@@ -7,7 +7,6 @@ use marinvpn_server::{AppState, api_routes};
 use std::sync::Arc;
 use marinvpn_common::{GenerateResponse, LoginRequest, LoginResponse};
 
-// Helper to create the app for testing
 async fn setup_app() -> axum::Router {
     let db_url = "sqlite::memory:";
     let db = marinvpn_server::services::db::Database::new(db_url).await.expect("Failed to create memory DB");
@@ -18,7 +17,6 @@ async fn setup_app() -> axum::Router {
     let vpn = marinvpn_server::services::vpn::VpnOrchestrator::new("wg0".to_string());
     let state = Arc::new(AppState { db, settings, vpn });
     
-    // Test api_routes directly
     api_routes().with_state(state)
 }
 
@@ -26,12 +24,11 @@ async fn setup_app() -> axum::Router {
 async fn test_generate_and_login() {
     let app = setup_app().await;
 
-    // 1. Generate account
     let response = app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/account/generate") // Nesting is handled by Setup in run(), but api_routes() is flat
+                .uri("/account/generate")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -44,7 +41,6 @@ async fn test_generate_and_login() {
     let gen_res: GenerateResponse = serde_json::from_slice(&body).unwrap();
     assert!(!gen_res.account_number.is_empty());
 
-    // 2. Login with generated account
     let login_req = LoginRequest {
         account_number: gen_res.account_number.clone(),
         device_name: Some("Test Device".to_string()),
