@@ -1,0 +1,10 @@
+/target/
+/node_modules/
+/dist/
+/.dioxus/
+**/*.rs.bk
+.DS_Store
+*.log
+.env
+*.env
+.env.*

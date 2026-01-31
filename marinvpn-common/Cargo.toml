@@ -1,0 +1,19 @@
+[package]
+name = "marinvpn-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+utoipa = { version = "5.0", features = ["chrono"], optional = true }
+validator = { version = "0.19", features = ["derive"], optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "chrono"], optional = true }
+
+[features]
+default = []
+openapi = ["utoipa"]
+validation = ["validator"]
+db = ["sqlx"]

@@ -1,0 +1,36 @@
+[package]
+name = "marinvpn"
+version = "0.1.0"
+authors = ["hellich"]
+edition = "2021"
+
+[dependencies]
+dioxus = { version = "0.7.1", features = ["router", "desktop"] }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+chrono = "0.4"
+tray-icon = "0.19.2"
+image = "0.25.5"
+tao = "0.30.0"
+directories = "6.0"
+futures-util = "0.3.31"
+reqwest = { version = "0.12", features = ["json"] }
+keyring = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1.89"
+marinvpn-common = { path = "../marinvpn-common" }
+boringtun = "0.6.0"
+base64 = "0.22"
+
+[features]
+default = ["desktop"]
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+server = ["dioxus/server"]
+
+[dev-dependencies]
+serial_test = "3.3.1"
