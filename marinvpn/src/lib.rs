@@ -3,8 +3,8 @@
 pub mod components;
 pub mod data;
 pub mod hooks;
-pub mod icons;
 pub mod i18n;
+pub mod icons;
 pub mod layouts;
 pub mod models;
 pub mod services;
@@ -13,30 +13,29 @@ pub mod storage;
 pub mod views;
 pub mod window;
 
-use dioxus::prelude::*;
-use dioxus::desktop::{Config, WindowBuilder, LogicalSize};
 use dioxus::desktop::tao::dpi::PhysicalPosition;
 use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
+use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
+use dioxus::prelude::*;
 
-use window::{use_tray_management, update_tray_tooltip, WINDOW_WIDTH, WINDOW_HEIGHT};
-use layouts::MainLayout;
-use state::{AppStateProvider, ConnectionState};
 use components::toast::ToastProvider;
+use layouts::MainLayout;
 use models::ConnectionStatus;
+use state::{AppStateProvider, ConnectionState};
 use views::{
-    dashboard::Dashboard,
-    locations::Locations,
-    settings::{
-        Settings, VpnSettingsPage, UiSettingsPage, DaitaSettings, 
-        MultihopSettings, SplitTunnelingSettings, AntiCensorshipSettings,
-        ServerOverrideSettings
-    },
     account::Account,
-    devices::Devices,
-    login::Login,
-    support::Support,
     app_info::AppInfo,
+    dashboard::Dashboard,
+    devices::Devices,
+    locations::Locations,
+    login::Login,
+    settings::{
+        AntiCensorshipSettings, DaitaSettings, MultihopSettings, ServerOverrideSettings, Settings,
+        SplitTunnelingSettings, UiSettingsPage, VpnSettingsPage,
+    },
+    support::Support,
 };
+use window::{update_tray_tooltip, use_tray_management, WINDOW_HEIGHT, WINDOW_WIDTH};
 
 #[derive(Clone, Routable, Debug, PartialEq)]
 #[rustfmt::skip]
@@ -116,7 +115,10 @@ fn AppContent() -> Element {
     use_effect(move || {
         if status == ConnectionStatus::Connected {
             let location_info = models::LocationInfo::from_string(&location);
-            update_tray_tooltip(&format!("Connected. {}, {}", location_info.city, location_info.country));
+            update_tray_tooltip(&format!(
+                "Connected. {}, {}",
+                location_info.city, location_info.country
+            ));
         } else {
             update_tray_tooltip("MarinVPN");
         }
@@ -146,12 +148,10 @@ pub fn run_app() {
                 .with_resizable(false)
                 .with_skip_taskbar(true)
                 .with_visible(false)
-                .with_position(PhysicalPosition::new(100, 100))
+                .with_position(PhysicalPosition::new(100, 100)),
         )
         .with_menu(None)
         .with_resource_directory(".");
 
-    LaunchBuilder::new()
-        .with_cfg(config)
-        .launch(App);
+    LaunchBuilder::new().with_cfg(config).launch(App);
 }

@@ -2,23 +2,23 @@ use dioxus::prelude::*;
 
 #[component]
 fn IconBase(
-    size: u32, 
-    #[props(default)] class: Option<String>, 
+    size: u32,
+    #[props(default)] class: Option<String>,
     #[props(default)] fill: Option<String>,
     #[props(default = 2)] stroke_width: u32,
-    children: Element
+    children: Element,
 ) -> Element {
     let class = class.unwrap_or_default();
     let fill = fill.unwrap_or("none".to_string());
     rsx! {
-        svg { 
-            width: "{size}", 
-            height: "{size}", 
-            view_box: "0 0 24 24", 
-            fill, 
-            stroke: "currentColor", 
-            stroke_width: "{stroke_width}", 
-            stroke_linecap: "round", 
+        svg {
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill,
+            stroke: "currentColor",
+            stroke_width: "{stroke_width}",
+            stroke_linecap: "round",
             stroke_linejoin: "round",
             class,
             {children}
@@ -124,7 +124,11 @@ pub fn Search(size: u32, #[props(default)] class: Option<String>) -> Element {
 }
 
 #[component]
-pub fn Star(size: u32, #[props(default)] class: Option<String>, #[props(default)] fill: Option<String>) -> Element {
+pub fn Star(
+    size: u32,
+    #[props(default)] class: Option<String>,
+    #[props(default)] fill: Option<String>,
+) -> Element {
     rsx! {
         IconBase { size, class, fill,
             path { d: "M11.525 2.223a.6.6 0 0 1 .95 0l2.31 3.407a.6.6 0 0 0 .434.24l4.105.442a.6.6 0 0 1 .332 1.02l-3.068 2.77a.6.6 0 0 0-.185.57l.84 4.052a.6.6 0 0 1-.87.632l-3.604-2.033a.6.6 0 0 0-.57 0l-3.604 2.033a.6.6 0 0 1-.87-.632l.84-4.052a.6.6 0 0 0-.185-.57l-3.068-2.77a.6.6 0 0 1 .332-1.02l4.105-.442a.6.6 0 0 0 .434-.24l2.31-3.407Z" }
@@ -149,7 +153,11 @@ pub fn Loader(size: u32, #[props(default)] class: Option<String>) -> Element {
 }
 
 #[component]
-pub fn Zap(size: u32, #[props(default)] class: Option<String>, #[props(default)] fill: Option<String>) -> Element {
+pub fn Zap(
+    size: u32,
+    #[props(default)] class: Option<String>,
+    #[props(default)] fill: Option<String>,
+) -> Element {
     rsx! {
         IconBase { size, class, fill,
             path { d: "M13 2 3 14h9l-1 8 10-12h-9l1-8z" }
@@ -244,7 +252,11 @@ pub fn MessageCircle(size: u32, #[props(default)] class: Option<String>) -> Elem
 }
 
 #[component]
-pub fn ShieldCheck(size: u32, #[props(default)] class: Option<String>, #[props(default = 2)] stroke_width: u32) -> Element {
+pub fn ShieldCheck(
+    size: u32,
+    #[props(default)] class: Option<String>,
+    #[props(default = 2)] stroke_width: u32,
+) -> Element {
     rsx! {
         IconBase { size, class, stroke_width,
             path { d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" }

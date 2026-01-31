@@ -1,11 +1,11 @@
-use std::fs;
-use std::path::PathBuf;
-use std::collections::HashSet;
-use serde::{Serialize, Deserialize};
-use tracing::{info, error};
-use keyring::Entry;
 use crate::models::SettingsState;
 use directories::ProjectDirs;
+use keyring::Entry;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
+use tracing::{error, info};
 
 const KEYRING_SERVICE: &str = "marinvpn";
 const CONFIG_FILENAME: &str = "marinvpn_config.json";
@@ -36,8 +36,10 @@ pub fn get_config_path() -> PathBuf {
         }
         return config_dir.join(CONFIG_FILENAME);
     }
-    
-    std::env::current_dir().unwrap_or_default().join(CONFIG_FILENAME)
+
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join(CONFIG_FILENAME)
 }
 
 fn get_account_entry() -> Result<Entry, keyring::Error> {
@@ -53,7 +55,10 @@ pub fn load_config() -> AppConfig {
     let mut config = match fs::read_to_string(&path) {
         Ok(contents) => {
             let legacy_account = match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(v) => v.get("account_number").and_then(|s| s.as_str()).map(|s| s.to_string()),
+                Ok(v) => v
+                    .get("account_number")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
                 Err(_) => None,
             };
 
@@ -67,16 +72,14 @@ pub fn load_config() -> AppConfig {
                         }
                     }
                     cfg
-                },
+                }
                 Err(e) => {
                     error!("Failed to parse config at {:?}: {}", path, e);
                     AppConfig::default()
                 }
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            AppConfig::default()
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => AppConfig::default(),
         Err(e) => {
             error!("Failed to read config at {:?}: {}", path, e);
             AppConfig::default()
@@ -88,7 +91,7 @@ pub fn load_config() -> AppConfig {
             config.account_number = Some(pwd);
         }
     }
-    
+
     if let Ok(entry) = get_token_entry() {
         if let Ok(pwd) = entry.get_password() {
             config.auth_token = Some(pwd);
@@ -118,7 +121,7 @@ pub fn save_config(config: &AppConfig) -> std::io::Result<()> {
     let path = get_config_path();
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    
+
     fs::write(&path, json)?;
     Ok(())
 }

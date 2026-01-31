@@ -1,8 +1,8 @@
-use dioxus::prelude::*;
-use crate::icons::*;
 use crate::components::*;
-use crate::state::ConnectionState;
+use crate::icons::*;
 use crate::models::Language;
+use crate::state::ConnectionState;
+use dioxus::prelude::*;
 
 #[component]
 pub fn UiSettings() -> Element {
@@ -13,18 +13,18 @@ pub fn UiSettings() -> Element {
 
     rsx! {
         div { class: "divide-y divide-border/30 -mx-4",
-            SettingRow { 
-                label: i18n.tr("connection_status_notif").to_string(), 
+            SettingRow {
+                label: i18n.tr("connection_status_notif").to_string(),
                 checked: true,
                 onclick: move |_| { /* Toggle */ }
             }
-            SettingRow { 
-                label: i18n.tr("security_alerts").to_string(), 
+            SettingRow {
+                label: i18n.tr("security_alerts").to_string(),
                 checked: true,
                 onclick: move |_| { /* Toggle */ }
             }
-            SettingRow { 
-                label: i18n.tr("new_locations").to_string(), 
+            SettingRow {
+                label: i18n.tr("new_locations").to_string(),
                 checked: false,
                 onclick: move |_| { /* Toggle */ }
             }
@@ -40,7 +40,7 @@ pub fn UiSettings() -> Element {
                 if lang_expanded() {
                     div { class: "bg-accent/5 divide-y divide-border/20",
                         for lang in Language::all() {
-                            div { 
+                            div {
                                 class: "px-4 flex items-center justify-between hover:bg-accent/20 transition-colors cursor-pointer last:border-0 shrink-0",
                                 style: "height: 48px !important; min-height: 48px !important;",
                                 onclick: move |_| {
@@ -56,8 +56,8 @@ pub fn UiSettings() -> Element {
                 }
             }
 
-            SettingRow { 
-                label: i18n.tr("dark_mode").to_string(), 
+            SettingRow {
+                label: i18n.tr("dark_mode").to_string(),
                 checked: settings.dark_mode,
                 onclick: move |_| {
                     state.settings.with_mut(|s| s.dark_mode = !s.dark_mode);

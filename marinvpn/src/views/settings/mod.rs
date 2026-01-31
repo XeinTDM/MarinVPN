@@ -1,15 +1,15 @@
-pub mod vpn;
 pub mod ui;
 pub mod view;
+pub mod vpn;
 
-pub use vpn::VpnSettings;
 pub use ui::UiSettings;
 pub use view::Settings;
+pub use vpn::VpnSettings;
 
-use dioxus::prelude::*;
-use crate::icons::{CircleCheck};
-use crate::state::ConnectionState;
 use crate::components::SettingRow;
+use crate::icons::CircleCheck;
+use crate::state::ConnectionState;
+use dioxus::prelude::*;
 
 use crate::hooks::use_scroll_handler;
 
@@ -178,7 +178,7 @@ pub fn SplitTunnelingSettings() -> Element {
 pub fn AntiCensorshipSettings() -> Element {
     let mut state = use_context::<ConnectionState>();
     let s = state.settings.read();
-    
+
     rsx! {
         div { class: "h-full w-full overflow-y-auto custom-scrollbar",
             div { class: "pb-24 -mx-4 divide-y divide-border/30",
@@ -187,13 +187,13 @@ pub fn AntiCensorshipSettings() -> Element {
                         "Configure settings to bypass network censorship and improve connectivity in restricted environments."
                     }
                 }
-                
+
                 div { class: "p-4 bg-accent/5",
                     h4 { class: "text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-3", "Stealth Protocol" }
-                    
+
                     div { class: "space-y-1",
                         // Automatic Mode
-                        div { 
+                        div {
                             class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
                             class: if s.stealth_mode == crate::models::StealthMode::Automatic { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
                             onclick: move |_| {
@@ -209,7 +209,7 @@ pub fn AntiCensorshipSettings() -> Element {
                         }
 
                         // WireGuard Port Mode
-                        div { 
+                        div {
                             class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
                             class: if s.stealth_mode == crate::models::StealthMode::WireGuardPort { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
                             onclick: move |_| {
@@ -225,7 +225,7 @@ pub fn AntiCensorshipSettings() -> Element {
                         }
 
                         // LWO Mode
-                        div { 
+                        div {
                             class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
                             class: if s.stealth_mode == crate::models::StealthMode::Lwo { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
                             onclick: move |_| {
@@ -241,7 +241,7 @@ pub fn AntiCensorshipSettings() -> Element {
                         }
 
                         // QUIC Mode
-                        div { 
+                        div {
                             class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
                             class: if s.stealth_mode == crate::models::StealthMode::Quic { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
                             onclick: move |_| {
@@ -257,7 +257,7 @@ pub fn AntiCensorshipSettings() -> Element {
                         }
 
                         // Shadowsocks Mode
-                        div { 
+                        div {
                             class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
                             class: if s.stealth_mode == crate::models::StealthMode::Shadowsocks { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
                             onclick: move |_| {
@@ -273,7 +273,7 @@ pub fn AntiCensorshipSettings() -> Element {
                         }
 
                         // Raw TCP Mode
-                        div { 
+                        div {
                             class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
                             class: if s.stealth_mode == crate::models::StealthMode::Tcp { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
                             onclick: move |_| {
@@ -289,7 +289,7 @@ pub fn AntiCensorshipSettings() -> Element {
                         }
 
                         // Standard Mode
-                        div { 
+                        div {
                             class: "px-3 py-2 rounded-xl flex items-center justify-between cursor-pointer transition-colors",
                             class: if s.stealth_mode == crate::models::StealthMode::None { "bg-primary/10 text-primary" } else { "hover:bg-accent/40 text-foreground" },
                             onclick: move |_| {
@@ -305,7 +305,7 @@ pub fn AntiCensorshipSettings() -> Element {
                         }
                     }
                 }
-                
+
                 div { class: "p-4",
                      p { class: "text-[10px] text-muted-foreground italic",
                         "Note: Using obfuscation protocols may slightly increase latency and reduce throughput due to encryption overhead."

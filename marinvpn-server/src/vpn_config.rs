@@ -2,7 +2,7 @@ pub use marinvpn_common::WireGuardConfig;
 
 pub fn get_config_for_location(location: &str) -> WireGuardConfig {
     let country = location.split(',').next().unwrap_or("Sweden").trim();
-    
+
     let endpoint = match country {
         "Sweden" => "se-sto.marinvpn.net:51820",
         "United States" => "us-nyc.marinvpn.net:51820",
@@ -23,5 +23,6 @@ pub fn get_config_for_location(location: &str) -> WireGuardConfig {
         pqc_handshake: None,
         pqc_provider: None,
         pqc_ciphertext: None,
+        obfuscation_key: None,
     }
 }

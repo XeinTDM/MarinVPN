@@ -3,12 +3,10 @@ use sqlx::FromRow;
 use utoipa::ToSchema;
 
 pub use marinvpn_common::{
-    Account, Device as CommonDevice, WireGuardConfig, 
-    LoginRequest as CommonLoginRequest, 
-    LoginResponse as CommonLoginResponse,
-    GenerateResponse, ErrorResponse,
-    ConfigRequest, RemoveDeviceRequest, ReportRequest,
-    VpnServer as CommonVpnServer, AnonymousConfigRequest, BlindTokenRequest, BlindTokenResponse
+    Account, AnonymousConfigRequest, BlindTokenRequest, BlindTokenResponse, ConfigRequest,
+    Device as CommonDevice, ErrorResponse, GenerateResponse, LoginRequest as CommonLoginRequest,
+    LoginResponse as CommonLoginResponse, RemoveDeviceRequest, ReportRequest,
+    VpnServer as CommonVpnServer, WireGuardConfig,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
@@ -58,9 +56,12 @@ impl VpnServer {
 }
 
 pub mod requests {
-    pub use marinvpn_common::{LoginRequest, ConfigRequest, RemoveDeviceRequest, ReportRequest, AnonymousConfigRequest, BlindTokenRequest};
+    pub use marinvpn_common::{
+        AnonymousConfigRequest, BlindTokenRequest, ConfigRequest, LoginRequest,
+        RemoveDeviceRequest, ReportRequest,
+    };
 }
 
 pub mod responses {
-    pub use marinvpn_common::{LoginResponse, GenerateResponse, ErrorResponse, BlindTokenResponse};
+    pub use marinvpn_common::{BlindTokenResponse, ErrorResponse, GenerateResponse, LoginResponse};
 }

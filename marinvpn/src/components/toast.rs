@@ -1,5 +1,5 @@
-use dioxus::prelude::*;
 use crate::icons::*;
+use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ToastType {
@@ -28,27 +28,27 @@ impl ToastManager {
         let id = *id_write;
         *id_write += 1;
         drop(id_write);
-        
+
         let toast = Toast {
             id,
             message: message.to_string(),
             type_,
             is_closing: false,
         };
-        
+
         self.toasts.write().push(toast);
 
         let mut toasts = self.toasts;
         spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-            
+
             toasts.with_mut(|t| {
                 if let Some(toast) = t.iter_mut().find(|t| t.id == id) {
                     toast.is_closing = true;
                 }
             });
 
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await; 
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             toasts.write().retain(|t| t.id != id);
         });
     }
@@ -60,7 +60,7 @@ pub fn use_toast() -> ToastManager {
 
 #[component]
 pub fn ToastProvider(children: Element) -> Element {
-    let toasts = use_signal(|| Vec::new());
+    let toasts = use_signal(Vec::new);
     let next_id = use_signal(|| 0);
 
     use_context_provider(|| ToastManager { toasts, next_id });

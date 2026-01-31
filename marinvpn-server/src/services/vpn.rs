@@ -1,6 +1,6 @@
-use std::process::Command;
 use crate::error::AppResult;
-use tracing::{info, warn, error};
+use std::process::Command;
+use tracing::{error, info, warn};
 
 pub struct VpnOrchestrator {
     interface: String,
@@ -13,8 +13,11 @@ impl VpnOrchestrator {
         if mock_mode {
             warn!("'wg' command not found. VpnOrchestrator running in MOCK mode.");
         }
-        
-        Self { interface, mock_mode }
+
+        Self {
+            interface,
+            mock_mode,
+        }
     }
 
     pub async fn register_peer(&self, pub_key: &str, allowed_ip: &str) -> AppResult<()> {
@@ -25,14 +28,17 @@ impl VpnOrchestrator {
         };
 
         if self.mock_mode {
-            info!("[MOCK] Registering peer {} on {}", masked_key, self.interface);
+            info!(
+                "[MOCK] Registering peer {} on {}",
+                masked_key, self.interface
+            );
             return Ok(());
         }
 
         let ip_only = allowed_ip.split('/').next().unwrap_or(allowed_ip);
 
         info!("Registering peer {} on {}", masked_key, self.interface);
-        
+
         let output = Command::new("wg")
             .arg("set")
             .arg(&self.interface)
@@ -67,12 +73,15 @@ impl VpnOrchestrator {
         };
 
         if self.mock_mode {
-            info!("[MOCK] Removing peer {} from {}", masked_key, self.interface);
+            info!(
+                "[MOCK] Removing peer {} from {}",
+                masked_key, self.interface
+            );
             return Ok(());
         }
 
         info!("Removing peer {} from {}", masked_key, self.interface);
-        
+
         let output = Command::new("wg")
             .arg("set")
             .arg(&self.interface)
@@ -88,7 +97,7 @@ impl VpnOrchestrator {
                 error!("Failed to remove peer: {}", err);
                 Err(anyhow::anyhow!("WireGuard command failed: {}", err).into())
             }
-            Err(e) => Err(anyhow::anyhow!("Failed to execute wg command: {}", e).into())
+            Err(e) => Err(anyhow::anyhow!("Failed to execute wg command: {}", e).into()),
         }
     }
 
@@ -98,11 +107,18 @@ impl VpnOrchestrator {
             return Ok(());
         }
 
-        info!("CRITICAL: Removing all peers from WireGuard interface {}", self.interface);
-        
-        let _ = Command::new("ip").args(&["link", "delete", &self.interface]).status();
-        let _ = Command::new("ip").args(&["link", "add", &self.interface, "type", "wireguard"]).status();
-        
+        info!(
+            "CRITICAL: Removing all peers from WireGuard interface {}",
+            self.interface
+        );
+
+        let _ = Command::new("ip")
+            .args(["link", "delete", &self.interface])
+            .status();
+        let _ = Command::new("ip")
+            .args(["link", "add", &self.interface, "type", "wireguard"])
+            .status();
+
         Ok(())
     }
 }

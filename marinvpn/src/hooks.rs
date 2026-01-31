@@ -1,7 +1,7 @@
-use dioxus::prelude::*;
+use crate::models::ConnectionStatus;
 use crate::state::ConnectionState;
 use crate::state::VpnAction;
-use crate::models::ConnectionStatus;
+use dioxus::prelude::*;
 
 #[derive(Clone, Copy)]
 pub struct VpnClient {
@@ -27,7 +27,7 @@ impl VpnClient {
             ConnectionStatus::Connected => {
                 self.disconnect();
             }
-            _ => {} 
+            _ => {}
         }
     }
 
@@ -67,13 +67,12 @@ pub fn use_i18n() -> I18n {
 
 pub fn use_scroll_handler(dns_expanded: Option<Signal<bool>>) {
     let mut state = use_context::<ConnectionState>();
-    
+
     use_effect(move || {
         if let Some(target) = (state.scroll_to)() {
-
             spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                
+
                 if target == "dns-blocking" {
                     if let Some(mut expanded) = dns_expanded {
                         expanded.set(true);
@@ -90,7 +89,7 @@ pub fn use_scroll_handler(dns_expanded: Option<Signal<bool>>) {
                     "#,
                     target
                 ));
-                
+
                 state.scroll_to.set(None);
             });
         }

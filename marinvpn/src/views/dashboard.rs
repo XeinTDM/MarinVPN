@@ -1,7 +1,7 @@
-use dioxus::prelude::*;
-use crate::state::ConnectionState;
 use crate::components::DashboardMap;
 use crate::models::ConnectionStatus;
+use crate::state::ConnectionState;
+use dioxus::prelude::*;
 
 #[component]
 pub fn Dashboard() -> Element {
@@ -9,16 +9,16 @@ pub fn Dashboard() -> Element {
     let status = (state.status)();
     let download_speed = (state.download_speed)();
     let upload_speed = (state.upload_speed)();
-    
+
     let location_text = (state.current_location)();
     let location = crate::models::LocationInfo::from_string(&location_text);
 
     let regions = state.regions.read();
-    
+
     rsx! {
         div { class: "relative w-full flex-1 bg-background overflow-hidden flex flex-col",
             DashboardMap { regions: regions.clone(), country: location.country, status }
-            
+
             if status == ConnectionStatus::Connected {
                 div { class: "absolute top-4 left-4 flex flex-col gap-2 pointer-events-none",
                     div { class: "bg-background/40 backdrop-blur-md border border-white/10 rounded-xl p-3 flex flex-col gap-1 shadow-lg",

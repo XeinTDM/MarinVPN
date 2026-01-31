@@ -1,10 +1,10 @@
-use dioxus::prelude::*;
-use crate::icons::{RefreshCw, Loader};
-use crate::Route;
-use crate::state::ConnectionState;
-use crate::models::{ConnectionStatus, SettingsState};
 use crate::hooks::use_vpn_client;
+use crate::icons::{Loader, RefreshCw};
+use crate::models::{ConnectionStatus, SettingsState};
+use crate::state::ConnectionState;
 use crate::window::WINDOW_WIDTH;
+use crate::Route;
+use dioxus::prelude::*;
 
 struct ConnectionDetails {
     country: String,
@@ -25,7 +25,7 @@ fn get_connection_details(location_text: &str, settings: &SettingsState) -> Conn
     };
     let city_lower = location.city.to_lowercase();
     let city_code = city_lower.get(0..3).unwrap_or("unk");
-    
+
     let server_name = if settings.multi_hop {
         format!("{}-{}-101 via se-sto-001", server_code, city_code)
     } else {
@@ -41,13 +41,27 @@ fn get_connection_details(location_text: &str, settings: &SettingsState) -> Conn
 
 fn get_active_features(settings: &SettingsState) -> Vec<String> {
     let mut features = Vec::new();
-    if settings.daita_enabled { features.push("DAITA".to_string()); }
-    if settings.quantum_resistant { features.push("Quantum resistance".to_string()); }
-    if settings.multi_hop { features.push("Multihop".to_string()); }
-    if settings.split_tunneling { features.push("Split tunneling".to_string()); }
-    if settings.lockdown_mode { features.push("Lockdown mode".to_string()); }
-    if settings.obfuscation { features.push("Obfuscation".to_string()); }
-    if settings.local_sharing { features.push("Local network sharing".to_string()); }
+    if settings.daita_enabled {
+        features.push("DAITA".to_string());
+    }
+    if settings.quantum_resistant {
+        features.push("Quantum resistance".to_string());
+    }
+    if settings.multi_hop {
+        features.push("Multihop".to_string());
+    }
+    if settings.split_tunneling {
+        features.push("Split tunneling".to_string());
+    }
+    if settings.lockdown_mode {
+        features.push("Lockdown mode".to_string());
+    }
+    if settings.obfuscation {
+        features.push("Obfuscation".to_string());
+    }
+    if settings.local_sharing {
+        features.push("Local network sharing".to_string());
+    }
 
     let dns_active = [
         (settings.dns_blocking.ads, "Ads"),
@@ -58,12 +72,15 @@ fn get_active_features(settings: &SettingsState) -> Vec<String> {
         (settings.dns_blocking.social_media, "Social Media"),
     ];
     let active_dns_count = dns_active.iter().filter(|(active, _)| *active).count();
-    
-    if active_dns_count == 1 {
-        let name = dns_active.iter().find(|(active, _)| *active).map(|(_, name)| *name).unwrap();
-        features.push(name.to_string());
-    } else if active_dns_count > 1 {
-        features.push("DNS content blockers".to_string());
+
+    match active_dns_count {
+        1 => {
+            if let Some((_, name)) = dns_active.iter().find(|(active, _)| *active) {
+                features.push(name.to_string());
+            }
+        }
+        n if n > 1 => features.push("DNS content blockers".to_string()),
+        _ => {}
     }
     features
 }
@@ -77,7 +94,7 @@ pub fn ConnectionOverlay() -> Element {
     let status = (state.status)();
     let settings = (state.settings)();
     let location_text = (state.current_location)();
-    
+
     let details = get_connection_details(&location_text, &settings);
     let features = get_active_features(&settings);
 
@@ -166,7 +183,7 @@ pub fn ConnectionOverlay() -> Element {
                                             "Ads" | "Trackers" | "Malware" | "Gambling" | "Adult Content"
                                             | "Social Media" | "DNS content blockers" => "dns-blocking",
                                             _ => "general",
-                                        }
+                                        };
                                         state.scroll_to.set(Some(target.to_string()));
                                         nav.push(Route::Settings {});
                                     },

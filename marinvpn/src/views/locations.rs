@@ -1,38 +1,45 @@
-use dioxus::prelude::*;
-use crate::icons::*;
-use crate::state::ConnectionState;
-use crate::models::ConnectionStatus;
-use crate::Route;
-use crate::hooks::use_vpn_client;
 use crate::components::toast::{use_toast, ToastType};
+use crate::hooks::use_vpn_client;
+use crate::icons::*;
 use crate::models::City;
+use crate::models::ConnectionStatus;
+use crate::state::ConnectionState;
+use crate::Route;
+use dioxus::prelude::*;
 
 #[component]
 pub fn Locations() -> Element {
     let state = use_context::<ConnectionState>();
-    let mut current_tab = use_signal(|| "All"); 
+    let mut current_tab = use_signal(|| "All");
 
     let mut expanded_country = use_signal(|| Option::<String>::None);
-    let mut search_query = use_signal(|| String::new());
+    let mut search_query = use_signal(String::new);
 
     let filtered_regions = use_memo(move || {
         let regions_val = state.regions.read();
         let query = search_query().to_lowercase();
         let favs = state.favorites.read();
         let show_favs = current_tab() == "Favorites";
-        
-        regions_val.iter().filter(|region| {
-            let matches_query = query.is_empty() || region.name.to_lowercase().contains(&query);
-            if !matches_query {
-                return false;
-            }
-            
-            if show_favs {
-                region.cities.iter().any(|c| favs.contains(&format!("{}, {}", region.name, c.name)))
-            } else {
-                true
-            }
-        }).cloned().collect::<Vec<_>>()
+
+        regions_val
+            .iter()
+            .filter(|region| {
+                let matches_query = query.is_empty() || region.name.to_lowercase().contains(&query);
+                if !matches_query {
+                    return false;
+                }
+
+                if show_favs {
+                    region
+                        .cities
+                        .iter()
+                        .any(|c| favs.contains(&format!("{}, {}", region.name, c.name)))
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect::<Vec<_>>()
     });
 
     rsx! {
@@ -82,7 +89,7 @@ pub fn Locations() -> Element {
                         let name2 = region.name.clone();
                         let name3 = region.name.clone();
                         rsx! {
-                            div { 
+                            div {
                                 key: "{name}",
                                 class: "bg-card border border-border rounded-2xl overflow-hidden shadow-sm hover:border-muted transition-colors",
                                 button {

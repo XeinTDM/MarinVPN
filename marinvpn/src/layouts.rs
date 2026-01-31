@@ -1,17 +1,17 @@
-use dioxus::prelude::*;
-use crate::icons::*;
-use crate::Route;
-use crate::state::ConnectionState;
 use crate::components::{BackButton, ConnectionOverlay};
+use crate::icons::*;
+use crate::state::ConnectionState;
+use crate::Route;
+use dioxus::prelude::*;
 
-use crate::window::{WINDOW_WIDTH, WINDOW_HEIGHT};
+use crate::window::{WINDOW_HEIGHT, WINDOW_WIDTH};
 
 #[component]
 pub fn MainLayout() -> Element {
     let state = use_context::<ConnectionState>();
     let nav = use_navigator();
     let i18n = crate::hooks::use_i18n();
-    
+
     use_effect(move || {
         if (state.account_number)().is_none() {
             nav.replace(Route::Login {});
@@ -30,7 +30,7 @@ pub fn MainLayout() -> Element {
     }
 
     let route = use_route::<Route>();
-    
+
     let is_dashboard = matches!(route, Route::Dashboard {});
     let is_sub_page = !is_dashboard;
 

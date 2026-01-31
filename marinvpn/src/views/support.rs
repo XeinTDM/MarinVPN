@@ -1,10 +1,10 @@
-use dioxus::prelude::*;
-use crate::icons::*;
-use crate::components::ui::modal::Modal;
-use crate::components::ui::button::LargeButton;
 use crate::components::toast::{use_toast, ToastType};
-use crate::state::ConnectionState;
+use crate::components::ui::button::LargeButton;
+use crate::components::ui::modal::Modal;
+use crate::icons::*;
 use crate::services::auth::AuthService;
+use crate::state::ConnectionState;
+use dioxus::prelude::*;
 
 #[component]
 pub fn Support() -> Element {
@@ -12,7 +12,7 @@ pub fn Support() -> Element {
     let mut toast = use_toast();
     let i18n = crate::hooks::use_i18n();
     let mut show_report_modal = use_signal(|| false);
-    let mut report_text = use_signal(|| String::new());
+    let mut report_text = use_signal(String::new);
     let mut is_submitting = use_signal(|| false);
 
     rsx! {

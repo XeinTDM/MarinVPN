@@ -1,8 +1,8 @@
-use dioxus::prelude::*;
+use crate::components::toast::{use_toast, ToastType};
 use crate::icons::*;
 use crate::state::ConnectionState;
 use crate::Route;
-use crate::components::toast::{use_toast, ToastType};
+use dioxus::prelude::*;
 
 #[component]
 pub fn Account() -> Element {

@@ -1,10 +1,9 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub use marinvpn_common::{
-    Account, Device, WireGuardConfig, ConnectionStatus, Protocol, 
-    DnsBlockingState, IpVersion, LoginRequest, LoginResponse, 
-    GenerateResponse, ConfigRequest, RemoveDeviceRequest, 
-    ReportRequest, ErrorResponse, VpnServer as CommonVpnServer
+    Account, ConfigRequest, ConnectionStatus, Device, DnsBlockingState, ErrorResponse,
+    GenerateResponse, IpVersion, LoginRequest, LoginResponse, Protocol, RemoveDeviceRequest,
+    ReportRequest, VpnServer as CommonVpnServer, WireGuardConfig,
 };
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]
@@ -17,11 +16,21 @@ pub enum Language {
     Spanish,
     Italian,
     Dutch,
-    Portuguese,
+    PortugueseBrazilian,
     Polish,
     Norwegian,
     Danish,
     Finnish,
+    Russian,
+    ChineseSimplified,
+    ChineseTraditional,
+    Arabic,
+    Turkish,
+    Persian,
+    Thai,
+    Japanese,
+    Korean,
+    Indonesian,
 }
 
 impl Language {
@@ -34,28 +43,48 @@ impl Language {
             Language::Spanish => "Español",
             Language::Italian => "Italiano",
             Language::Dutch => "Nederlands",
-            Language::Portuguese => "Português",
+            Language::PortugueseBrazilian => "Português (Brasil)",
             Language::Polish => "Polski",
             Language::Norwegian => "Norsk",
             Language::Danish => "Dansk",
             Language::Finnish => "Suomi",
+            Language::Russian => "Русский",
+            Language::ChineseSimplified => "简体中文",
+            Language::ChineseTraditional => "繁體中文",
+            Language::Arabic => "العربية",
+            Language::Turkish => "Türkçe",
+            Language::Persian => "فارسی",
+            Language::Thai => "ไทย",
+            Language::Japanese => "日本語",
+            Language::Korean => "한국어",
+            Language::Indonesian => "Bahasa Indonesia",
         }
     }
 
     pub fn all() -> &'static [Language] {
         &[
-            Language::English, 
-            Language::Swedish, 
-            Language::German, 
+            Language::English,
+            Language::Swedish,
+            Language::German,
             Language::French,
             Language::Spanish,
             Language::Italian,
             Language::Dutch,
-            Language::Portuguese,
+            Language::PortugueseBrazilian,
             Language::Polish,
             Language::Norwegian,
             Language::Danish,
             Language::Finnish,
+            Language::Russian,
+            Language::ChineseSimplified,
+            Language::ChineseTraditional,
+            Language::Arabic,
+            Language::Turkish,
+            Language::Persian,
+            Language::Thai,
+            Language::Japanese,
+            Language::Korean,
+            Language::Indonesian,
         ]
     }
 }
@@ -161,7 +190,7 @@ pub struct LocationInfo {
 impl LocationInfo {
     pub fn from_string(s: &str) -> Self {
         let parts: Vec<&str> = s.split(',').collect();
-        let country = parts.get(0).unwrap_or(&"Unknown").trim().to_string();
+        let country = parts.first().unwrap_or(&"Unknown").trim().to_string();
         let city = parts.get(1).unwrap_or(&"Unknown").trim().to_string();
         Self { country, city }
     }

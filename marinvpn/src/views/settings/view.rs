@@ -1,9 +1,9 @@
-use dioxus::prelude::*;
-use dioxus::desktop::use_window;
+use crate::components::MenuRow;
 use crate::icons::*;
 use crate::state::ConnectionState;
-use crate::components::MenuRow;
 use crate::Route;
+use dioxus::desktop::use_window;
+use dioxus::prelude::*;
 
 #[component]
 pub fn Settings() -> Element {
@@ -14,7 +14,8 @@ pub fn Settings() -> Element {
     use_effect(move || {
         if let Some(target) = (state.scroll_to)() {
             match target.as_str() {
-                "protocol" | "quantum-resistant" | "kill-switch" | "dns-blocking" | "ipv6" | "auto-connect" | "local-sharing" | "launch-startup" => {
+                "protocol" | "quantum-resistant" | "kill-switch" | "dns-blocking" | "ipv6"
+                | "auto-connect" | "local-sharing" | "launch-startup" => {
                     nav.push(Route::VpnSettingsPage {});
                 }
                 "multi-hop" => {
@@ -33,7 +34,7 @@ pub fn Settings() -> Element {
             }
         }
     });
-    
+
     rsx! {
         div { class: "h-full w-full flex flex-col bg-background",
             div { class: "flex-1 overflow-y-auto custom-scrollbar",

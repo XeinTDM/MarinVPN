@@ -1,17 +1,17 @@
-use dioxus::prelude::*;
+use crate::components::toast::ToastManager;
+use crate::components::toast::ToastType;
 use crate::hooks::use_i18n;
 use crate::services::auth::AuthService;
 use crate::state::ConnectionState;
-use crate::components::toast::ToastType;
-use crate::components::toast::ToastManager;
+use dioxus::prelude::*;
 
 #[component]
 pub fn Login() -> Element {
     let mut state = use_context::<ConnectionState>();
     let mut toasts = use_context::<ToastManager>();
     let i18n = use_i18n();
-    
-    let mut account_input = use_signal(|| String::new());
+
+    let mut account_input = use_signal(String::new);
     let mut is_loading = use_signal(|| false);
 
     let on_login = move |_| {

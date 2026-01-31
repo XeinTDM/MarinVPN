@@ -1,5 +1,5 @@
+use config::{Config, ConfigError, Environment, File};
 use serde::Deserialize;
-use config::{Config, ConfigError, File, Environment};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerSettings {
@@ -38,8 +38,14 @@ impl Settings {
             .set_default("server.host", "127.0.0.1")?
             .set_default("server.log_level", "info")?
             .set_default("database.url", "sqlite:marinvpn.db")?
-            .set_default("auth.jwt_secret", "replace-with-a-real-secret-in-production")?
-            .set_default("auth.attestation_secret", "marinvpn_secure_attestation_2026_top_tier")?
+            .set_default(
+                "auth.jwt_secret",
+                "replace-with-a-real-secret-in-production",
+            )?
+            .set_default(
+                "auth.attestation_secret",
+                "marinvpn_secure_attestation_2026_top_tier",
+            )?
             .set_default("auth.account_salt", "marinvpn_default_salt_2026")?
             .set_default("auth.panic_key", "emergency_default_2026")?
             // Load from file

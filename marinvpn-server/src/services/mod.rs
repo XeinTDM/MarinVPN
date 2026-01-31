@@ -1,3 +1,3 @@
+pub mod auth;
 pub mod db;
 pub mod vpn;
-pub mod auth;

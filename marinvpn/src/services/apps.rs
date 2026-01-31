@@ -1,6 +1,6 @@
 use crate::models::AppInfo;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
 pub struct AppScanner;
 
@@ -10,11 +10,13 @@ impl AppScanner {
 
         #[cfg(target_os = "windows")]
         {
-            let start_menu = PathBuf::from("C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs");
+            let start_menu =
+                PathBuf::from("C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs");
             Self::scan_dir_for_lnk(&start_menu, &mut apps);
 
             if let Ok(user_profile) = std::env::var("USERPROFILE") {
-                let user_start = PathBuf::from(user_profile).join("AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs");
+                let user_start = PathBuf::from(user_profile)
+                    .join("AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs");
                 Self::scan_dir_for_lnk(&user_start, &mut apps);
             }
         }
@@ -24,7 +26,9 @@ impl AppScanner {
             let paths = vec![
                 PathBuf::from("/usr/share/applications"),
                 PathBuf::from("/usr/local/share/applications"),
-                dirs::home_dir().map(|h| h.join(".local/share/applications")).unwrap_or_default(),
+                dirs::home_dir()
+                    .map(|h| h.join(".local/share/applications"))
+                    .unwrap_or_default(),
             ];
 
             for path in paths {
@@ -34,7 +38,7 @@ impl AppScanner {
 
         apps.sort_by(|a, b| a.name.cmp(&b.name));
         apps.dedup_by(|a, b| a.path == b.path);
-        
+
         apps
     }
 
@@ -46,7 +50,11 @@ impl AppScanner {
                 if path.is_dir() {
                     Self::scan_dir_for_lnk(&path, apps);
                 } else if path.extension().and_then(|s| s.to_str()) == Some("lnk") {
-                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
                     apps.push(AppInfo {
                         name,
                         path: path.to_string_lossy().to_string(),
@@ -74,7 +82,11 @@ impl AppScanner {
                             }
                         }
                         if !name.is_empty() && !exec.is_empty() {
-                            apps.push(AppInfo { name, path: exec, icon: None });
+                            apps.push(AppInfo {
+                                name,
+                                path: exec,
+                                icon: None,
+                            });
                         }
                     }
                 }

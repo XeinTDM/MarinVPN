@@ -1,3 +1,4 @@
+use anyhow;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -5,7 +6,6 @@ use axum::{
 };
 use serde_json::json;
 use thiserror::Error;
-use anyhow;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -39,15 +39,24 @@ impl IntoResponse for AppError {
         let (status, error_message) = match &self {
             AppError::Internal(e) => {
                 tracing::error!("Internal error: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
             }
             AppError::Database(e) => {
                 tracing::error!("Database error: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Database operation failed".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database operation failed".to_string(),
+                )
             }
             AppError::Migration(e) => {
                 tracing::error!("Migration error: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Migration failed".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Migration failed".to_string(),
+                )
             }
             AppError::AccountNotFound => (StatusCode::UNAUTHORIZED, self.to_string()),
             AppError::AccountExpired => (StatusCode::FORBIDDEN, self.to_string()),

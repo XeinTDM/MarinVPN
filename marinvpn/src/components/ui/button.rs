@@ -1,11 +1,11 @@
-use dioxus::prelude::*;
 use crate::icons::ArrowLeft;
+use dioxus::prelude::*;
 
 #[component]
 pub fn BackButton() -> Element {
     let nav = use_navigator();
     rsx! {
-        button { 
+        button {
             class: "w-12 flex items-center justify-center hover:bg-accent rounded-xl transition-all no-drag text-foreground active:scale-90 shadow-sm border border-transparent hover:border-border shrink-0",
             style: "height: 48px !important; min-height: 48px !important;",
             onclick: move |_| { nav.go_back(); },
@@ -20,10 +20,10 @@ pub fn LargeButton(
     description: String,
     icon: Element,
     icon_class: String,
-    onclick: EventHandler<MouseEvent>
+    onclick: EventHandler<MouseEvent>,
 ) -> Element {
     rsx! {
-        button { 
+        button {
             class: "w-full bg-card hover:bg-accent/40 border border-border rounded-2xl p-4 flex items-center gap-4 transition-all group text-left active:scale-95 shadow-sm",
             onclick: move |e| onclick.call(e),
             div { class: "p-3 rounded-xl transition-colors {icon_class}",

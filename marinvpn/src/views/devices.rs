@@ -1,8 +1,8 @@
-use dioxus::prelude::*;
-use crate::icons::{RefreshCw, X};
-use crate::state::ConnectionState;
 use crate::components::toast::{use_toast, ToastType};
+use crate::icons::{RefreshCw, X};
 use crate::services::auth::AuthService;
+use crate::state::ConnectionState;
+use dioxus::prelude::*;
 
 #[component]
 pub fn Devices() -> Element {
@@ -10,16 +10,14 @@ pub fn Devices() -> Element {
     let mut toast = use_toast();
     let account_number = (state.account_number)().unwrap_or_default();
     let auth_token = (state.auth_token)().unwrap_or_default();
-    
+
     let mut devices_resource = {
         let acc = account_number.clone();
         let token = auth_token.clone();
         use_resource(move || {
             let acc = acc.clone();
             let token = token.clone();
-            async move {
-                AuthService::get_devices(&acc, &token).await
-            }
+            async move { AuthService::get_devices(&acc, &token).await }
         })
     };
 
@@ -32,6 +30,7 @@ pub fn Devices() -> Element {
                             for device in devices {
                                 {
                                     let name = device.name.clone();
+                                    let name_for_action = name.clone();
                                     let is_current = name == (state.device_name)();
                                     let dt = chrono::DateTime::from_timestamp(device.added_at, 0).unwrap_or_default();
                                     let date_str = dt.format("%b %d, %Y").to_string();
@@ -43,7 +42,7 @@ pub fn Devices() -> Element {
                                         div {
                                             key: "{name}",
                                             class: "px-1",
-                                            div { 
+                                            div {
                                                 class: "bg-card rounded-2xl p-4 border shadow-sm flex items-center justify-between transition-all",
                                                 class: if is_current { "border-primary/20 bg-card/50" } else { "border-border hover:border-muted-foreground/20" },
                                                 div { class: "flex items-center gap-4",
@@ -67,7 +66,7 @@ pub fn Devices() -> Element {
                                                         onclick: move |_| {
                                                             let acc = acc_for_remove.clone();
                                                             let token = token_for_remove.clone();
-                                                            let dev_name = name.clone();
+                                                            let dev_name = name_for_action.clone();
                                                             spawn(async move {
                                                                 match AuthService::remove_device(&acc, &dev_name, &token).await {
                                                                     Ok(_) => {

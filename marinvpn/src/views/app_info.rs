@@ -1,5 +1,5 @@
-use dioxus::prelude::*;
 use crate::icons::*;
+use dioxus::prelude::*;
 
 #[component]
 pub fn AppInfo() -> Element {
@@ -9,7 +9,7 @@ pub fn AppInfo() -> Element {
     rsx! {
         div { class: "h-full p-4 overflow-y-auto bg-background text-foreground custom-scrollbar",
             div { class: "flex flex-col items-center mb-8",
-                div { class: "w-16 h-16 bg-primary rounded-[2rem] flex items-center justify-center text-primary-foreground shadow-2xl shadow-primary/20 mb-4 rotate-3", 
+                div { class: "w-16 h-16 bg-primary rounded-[2rem] flex items-center justify-center text-primary-foreground shadow-2xl shadow-primary/20 mb-4 rotate-3",
                     ShieldCheck { size: 32, stroke_width: 2 }
                 }
                 h3 { class: "text-2xl font-bold text-foreground", "MarinVPN" }
@@ -25,19 +25,19 @@ pub fn AppInfo() -> Element {
                         div { class: "flex-1",
                             h4 { class: "font-bold text-lg mb-1 text-foreground", {i18n.tr("beta_program")} }
                             p { class: "text-[11px] text-muted-foreground font-medium mb-4 leading-relaxed", {i18n.tr("beta_desc")} }
-                            
+
                             if beta_joined() {
-                                button { 
+                                button {
                                     class: "w-full h-[48px] min-h-[48px] bg-accent/50 hover:bg-accent border border-border rounded-xl text-xs font-bold transition-all active:scale-95 text-foreground flex items-center justify-center",
                                     onclick: move |_| beta_joined.set(false),
-                                    {i18n.tr("leave_beta")} 
+                                    {i18n.tr("leave_beta")}
                                 }
                             } else {
-                                button { 
+                                button {
                                     class: "w-full bg-primary hover:brightness-110 text-primary-foreground rounded-xl text-xs font-bold transition-all active:scale-95 shadow-lg shadow-primary/20 flex items-center justify-center shrink-0",
                                     style: "height: 48px !important; min-height: 48px !important;",
                                     onclick: move |_| beta_joined.set(true),
-                                    {i18n.tr("join_beta")} 
+                                    {i18n.tr("join_beta")}
                                 }
                             }
                         }
@@ -47,9 +47,9 @@ pub fn AppInfo() -> Element {
                 div {
                     h4 { class: "text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-3 ml-1", {i18n.tr("whats_new")} }
                     div { class: "space-y-4",
-                        ChangeLogItem { 
-                            version: "v0.1.5", 
-                            date: "Jan 29, 2026", 
+                        ChangeLogItem {
+                            version: "v0.1.5",
+                            date: "Jan 29, 2026",
                             changes: vec![
                                 "Added Quantum-resistant tunnel option.",
                                 "Implemented granular DNS content blocking.",
@@ -57,9 +57,9 @@ pub fn AppInfo() -> Element {
                                 "Improved UI for tray mode."
                             ]
                         }
-                        ChangeLogItem { 
-                            version: "v0.1.4", 
-                            date: "Jan 15, 2026", 
+                        ChangeLogItem {
+                            version: "v0.1.4",
+                            date: "Jan 15, 2026",
                             changes: vec![
                                 "Added Favorites to location list.",
                                 "Fixed connection timeout issues.",

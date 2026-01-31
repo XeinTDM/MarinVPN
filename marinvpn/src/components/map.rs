@@ -1,7 +1,7 @@
-use dioxus::prelude::*;
-use crate::models::{Region, ConnectionStatus};
 use crate::hooks::use_vpn_client;
+use crate::models::{ConnectionStatus, Region};
 use crate::state::ConnectionState;
+use dioxus::prelude::*;
 
 const MAP_WIDTH: f64 = 800.0;
 const MAP_HEIGHT: f64 = 600.0;
@@ -35,9 +35,9 @@ pub fn DashboardMap(regions: Vec<Region>, country: String, status: ConnectionSta
         spawn(async move {
             let mut steps = 0;
             loop {
-                let (cx, cy, cw, ch) = current_view.peek().clone();
+                let (cx, cy, cw, ch) = *current_view.peek();
                 let (tx, ty, tw, th) = target;
-                
+
                 let nx = cx + (tx - cx) * ANIMATION_SPEED;
                 let ny = cy + (ty - cy) * ANIMATION_SPEED;
                 let nw = cw + (tw - cw) * ANIMATION_SPEED;
@@ -50,9 +50,11 @@ pub fn DashboardMap(regions: Vec<Region>, country: String, status: ConnectionSta
 
                 current_view.set((nx, ny, nw, nh));
                 tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-                
+
                 steps += 1;
-                if steps > 200 { break; }
+                if steps > 200 {
+                    break;
+                }
             }
         });
     });
@@ -145,13 +147,14 @@ pub fn DashboardMap(regions: Vec<Region>, country: String, status: ConnectionSta
                 for region in regions.iter().cloned() {
                     {
                         let name = region.name.clone();
+                        let click_name = name.clone();
                         rsx! {
                             g {
                                 key: "{name}",
                                 class: "cursor-pointer transition-all duration-300 pointer-events-auto",
                                 class: if country == region.name { "opacity-100 scale-125" } else { "opacity-40 hover:opacity-100" },
                                 onclick: move |_| {
-                                    vpn.connect(format!("{}, Auto", name));
+                                    vpn.connect(format!("{}, Auto", click_name.clone()));
                                 },
                                 circle {
                                     cx: "{region.map_x}",

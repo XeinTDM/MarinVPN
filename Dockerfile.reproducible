@@ -1,0 +1,42 @@
+# MarinVPN Reproducible Build Environment
+# Reference: https://reproducible-builds.org/
+
+FROM debian:bookworm-20250120-slim
+
+ARG BUILD_DATE
+ARG REVISION
+LABEL org.opencontainers.image.created=$BUILD_DATE \
+      org.opencontainers.image.revision=$REVISION \
+      org.opencontainers.image.title="MarinVPN Server (Reproducible)"
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    sqlite3 \
+    libsqlite3-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.84.0
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain $RUST_VERSION
+
+WORKDIR /build
+COPY . .
+
+# Build with deterministic flags:
+# 1. --remap-path-prefix: Removes absolute paths from the binary (crucial for reproducibility)
+# 2. -C debuginfo=0: Reduces non-determinism in debug symbols
+# 3. -C codegen-units=1: Ensures consistent optimization results
+ENV RUSTFLAGS="-C debuginfo=0 -C codegen-units=1 --remap-path-prefix=/build=/sources"
+
+RUN cargo build --release --package marinvpn-server
+RUN sha256sum target/release/marinvpn-server > target/release/marinvpn-server.sha256
+
+CMD ["cat", "target/release/marinvpn-server.sha256"]

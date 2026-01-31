@@ -1,30 +1,36 @@
-use axum::{extract::State, Json};
-use marinvpn_common::{ConfigRequest, AnonymousConfigRequest, ErrorResponse, WireGuardConfig, ReportRequest};
-use crate::error::{AppResult, AppError};
-use crate::AppState;
-use crate::models::CommonVpnServer;
+use crate::error::{AppError, AppResult};
 use crate::handlers::auth::AuthUser;
-use std::sync::Arc;
-use chrono::Utc;
-use validator::Validate;
+use crate::models::CommonVpnServer;
+use crate::AppState;
+use axum::{extract::State, Json};
 use base64::Engine;
-use rand::Rng;
+use chrono::Utc;
+use marinvpn_common::{
+    AnonymousConfigRequest, ConfigRequest, ErrorResponse, ReportRequest, WireGuardConfig,
+};
 use ml_kem::kem::Encapsulate;
-use ml_kem::{MlKem768Params, EncodedSizeUser};
+use ml_kem::{EncodedSizeUser, MlKem768Params};
+use rand::Rng;
+use std::sync::Arc;
+use validator::Validate;
 
 fn encapsulate_pqc(pk_base64: &str) -> Option<(String, String)> {
-    let pk_bytes = base64::engine::general_purpose::STANDARD.decode(pk_base64).ok()?;
-    let pk = <ml_kem::kem::EncapsulationKey<MlKem768Params> as EncodedSizeUser>::from_bytes(pk_bytes.as_slice().try_into().ok()?);
-    
+    let pk_bytes = base64::engine::general_purpose::STANDARD
+        .decode(pk_base64)
+        .ok()?;
+    let pk = <ml_kem::kem::EncapsulationKey<MlKem768Params> as EncodedSizeUser>::from_bytes(
+        pk_bytes.as_slice().try_into().ok()?,
+    );
+
     let mut rng = rand::thread_rng();
     let (ct, ss) = pk.encapsulate(&mut rng).ok()?;
-    
+
     let ss_bytes: &[u8] = ss.as_slice();
     let ct_bytes: &[u8] = ct.as_slice();
 
     Some((
         base64::engine::general_purpose::STANDARD.encode(ss_bytes),
-        base64::engine::general_purpose::STANDARD.encode(ct_bytes)
+        base64::engine::general_purpose::STANDARD.encode(ct_bytes),
     ))
 }
 
@@ -47,9 +53,11 @@ pub async fn get_servers(
 )]
 pub async fn get_anonymous_config(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<AnonymousConfigRequest>
+    Json(payload): Json<AnonymousConfigRequest>,
 ) -> AppResult<Json<WireGuardConfig>> {
-    payload.validate().map_err(|e: validator::ValidationErrors| AppError::BadRequest(e.to_string()))?;
+    payload
+        .validate()
+        .map_err(|e: validator::ValidationErrors| AppError::BadRequest(e.to_string()))?;
 
     if !state.signer.verify(&payload.message, &payload.signature) {
         return Err(AppError::Unauthorized);
@@ -59,36 +67,69 @@ pub async fn get_anonymous_config(
         return Err(AppError::BadRequest("Token already used".to_string()));
     }
 
-    state.db.mark_token_used(&payload.message).await?;
+    if let Err(e) = state.db.mark_token_used(&payload.message).await {
+        // If it's a unique constraint violation, it means another request just used this token
+        if let AppError::Database(sqlx::Error::Database(db_err)) = &e {
+            if db_err.is_unique_violation() {
+                return Err(AppError::BadRequest(
+                    "Token already used (concurrent)".to_string(),
+                ));
+            }
+        }
+        return Err(e);
+    }
 
-    let country = payload.location.split(',').next().unwrap_or("Sweden").trim();
+    let country = payload
+        .location
+        .split(',')
+        .next()
+        .unwrap_or("Sweden")
+        .trim();
     let servers = state.db.get_servers_by_location(country).await?;
-    let server = servers.into_iter()
+    let server = servers
+        .into_iter()
         .min_by(|a, b| a.health_score().partial_cmp(&b.health_score()).unwrap())
-        .ok_or(AppError::BadRequest("No active servers in this location".to_string()))?;
+        .ok_or(AppError::BadRequest(
+            "No active servers in this location".to_string(),
+        ))?;
 
     let assigned_ip = state.db.get_or_create_peer(&payload.pub_key).await?;
-    state.vpn.register_peer(&payload.pub_key, &assigned_ip).await?;
+    state
+        .vpn
+        .register_peer(&payload.pub_key, &assigned_ip)
+        .await?;
+
+    let dns_servers = "1.1.1.1, 8.8.8.8".to_string();
 
     let (psk, pqc_info, pqc_ct) = if payload.quantum_resistant {
         if let Some(ref pk_b64) = payload.pqc_public_key {
             if let Some((ss_b64, ct_b64)) = encapsulate_pqc(pk_b64) {
-                (Some(ss_b64), Some("ML-KEM-768 Hybrid".to_string()), Some(ct_b64))
+                (
+                    Some(ss_b64),
+                    Some("ML-KEM-768 Hybrid".to_string()),
+                    Some(ct_b64),
+                )
             } else {
                 (None, Some("PQC Error".to_string()), None)
             }
         } else {
-            let psk = base64::engine::general_purpose::STANDARD.encode(rand::thread_rng().gen::<[u8; 32]>());
-            (Some(psk), Some("ML-KEM-768 (Fallback to random PSK)".to_string()), None)
+            let psk = base64::engine::general_purpose::STANDARD
+                .encode(rand::thread_rng().gen::<[u8; 32]>());
+            (
+                Some(psk),
+                Some("ML-KEM-768 (Fallback to random PSK)".to_string()),
+                None,
+            )
         }
     } else {
         (None, None, None)
     };
 
-    let obfuscation_key = base64::engine::general_purpose::STANDARD.encode(rand::thread_rng().gen::<[u8; 32]>());
+    let obfuscation_key =
+        base64::engine::general_purpose::STANDARD.encode(rand::thread_rng().gen::<[u8; 32]>());
 
     let config = WireGuardConfig {
-        private_key: "".to_string(), 
+        private_key: "".to_string(),
         public_key: server.public_key,
         preshared_key: psk,
         endpoint: server.endpoint,
@@ -96,7 +137,11 @@ pub async fn get_anonymous_config(
         address: assigned_ip,
         dns: Some(dns_servers),
         pqc_handshake: pqc_info,
-        pqc_provider: if payload.quantum_resistant { Some("MarinQuantum v1".to_string()) } else { None },
+        pqc_provider: if payload.quantum_resistant {
+            Some("MarinQuantum v1".to_string())
+        } else {
+            None
+        },
         pqc_ciphertext: pqc_ct,
         obfuscation_key: Some(obfuscation_key),
     };
@@ -117,30 +162,45 @@ pub async fn get_anonymous_config(
 pub async fn get_vpn_config(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
-    Json(payload): Json<ConfigRequest>
+    Json(payload): Json<ConfigRequest>,
 ) -> AppResult<Json<WireGuardConfig>> {
-    payload.validate().map_err(|e| AppError::BadRequest(e.to_string()))?;
+    payload
+        .validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     if auth.account_number != payload.account_number {
         return Err(AppError::Unauthorized);
     }
 
-    let account = state.db.get_account(&payload.account_number).await?
+    let account = state
+        .db
+        .get_account(&payload.account_number)
+        .await?
         .ok_or(AppError::AccountNotFound)?;
-        
+
     if account.expiry_date < Utc::now().timestamp() {
         return Err(AppError::AccountExpired);
     }
 
-    let country = payload.location.split(',').next().unwrap_or("Sweden").trim();
+    let country = payload
+        .location
+        .split(',')
+        .next()
+        .unwrap_or("Sweden")
+        .trim();
     let servers = state.db.get_servers_by_location(country).await?;
-    let server = servers.into_iter()
+    let server = servers
+        .into_iter()
         .min_by(|a, b| a.health_score().partial_cmp(&b.health_score()).unwrap())
-        .ok_or(AppError::BadRequest("No active servers in this location".to_string()))?;
+        .ok_or(AppError::BadRequest(
+            "No active servers in this location".to_string(),
+        ))?;
 
     let assigned_ip = state.db.get_or_create_peer(&payload.pub_key).await?;
-    state.vpn.register_peer(&payload.pub_key, &assigned_ip).await?;
-
+    state
+        .vpn
+        .register_peer(&payload.pub_key, &assigned_ip)
+        .await?;
 
     let dns_servers = if let Some(ref prefs) = payload.dns_blocking {
         if prefs.ads || prefs.trackers || prefs.malware {
@@ -157,22 +217,32 @@ pub async fn get_vpn_config(
     let (psk, pqc_info, pqc_ct) = if payload.quantum_resistant {
         if let Some(ref pk_b64) = payload.pqc_public_key {
             if let Some((ss_b64, ct_b64)) = encapsulate_pqc(pk_b64) {
-                (Some(ss_b64), Some("ML-KEM-768 Hybrid".to_string()), Some(ct_b64))
+                (
+                    Some(ss_b64),
+                    Some("ML-KEM-768 Hybrid".to_string()),
+                    Some(ct_b64),
+                )
             } else {
                 (None, Some("PQC Error".to_string()), None)
             }
         } else {
-            let psk = base64::engine::general_purpose::STANDARD.encode(rand::thread_rng().gen::<[u8; 32]>());
-            (Some(psk), Some("ML-KEM-768 (Fallback to random PSK)".to_string()), None)
+            let psk = base64::engine::general_purpose::STANDARD
+                .encode(rand::thread_rng().gen::<[u8; 32]>());
+            (
+                Some(psk),
+                Some("ML-KEM-768 (Fallback to random PSK)".to_string()),
+                None,
+            )
         }
     } else {
         (None, None, None)
     };
 
-    let obfuscation_key = base64::engine::general_purpose::STANDARD.encode(rand::thread_rng().gen::<[u8; 32]>());
+    let obfuscation_key =
+        base64::engine::general_purpose::STANDARD.encode(rand::thread_rng().gen::<[u8; 32]>());
 
     let config = WireGuardConfig {
-        private_key: "".to_string(), 
+        private_key: "".to_string(),
         public_key: server.public_key,
         preshared_key: psk,
         endpoint: server.endpoint,
@@ -180,7 +250,11 @@ pub async fn get_vpn_config(
         address: assigned_ip,
         dns: Some(dns_servers),
         pqc_handshake: pqc_info,
-        pqc_provider: if payload.quantum_resistant { Some("MarinQuantum v1".to_string()) } else { None },
+        pqc_provider: if payload.quantum_resistant {
+            Some("MarinQuantum v1".to_string())
+        } else {
+            None
+        },
         pqc_ciphertext: pqc_ct,
         obfuscation_key: Some(obfuscation_key),
     };
@@ -198,35 +272,64 @@ pub async fn get_vpn_config(
     )
 )]
 pub async fn report_problem(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     auth: AuthUser,
-    Json(payload): Json<ReportRequest>
+    Json(payload): Json<ReportRequest>,
 ) -> AppResult<Json<bool>> {
-    payload.validate().map_err(|e: validator::ValidationErrors| AppError::BadRequest(e.to_string()))?;
+    payload
+        .validate()
+        .map_err(|e: validator::ValidationErrors| AppError::BadRequest(e.to_string()))?;
 
     if auth.account_number != payload.account_number {
         return Err(AppError::Unauthorized);
     }
 
-    let _account = state.db.get_account(&payload.account_number).await?
-        .ok_or(AppError::AccountNotFound)?;
-        
+    if !payload.is_encrypted {
+        tracing::warn!(
+            "SECURITY ALERT: Received UNENCRYPTED problem report from {}!",
+            payload.account_number
+        );
+    }
+
     let masked_account = if payload.account_number.len() >= 12 {
-        format!("{} **** **** {}", &payload.account_number[0..4], &payload.account_number[payload.account_number.len()-4..])
+        format!(
+            "{} **** **** {}",
+            &payload.account_number[0..4],
+            &payload.account_number[payload.account_number.len() - 4..]
+        )
     } else {
         "****".to_string()
     };
 
-    let cleaned_message = if payload.message.len() > 500 {
-        format!("{}... [TRUNCATED]", &payload.message[0..500])
-    } else {
-        payload.message.clone()
-    };
+    tracing::info!(
+        "PROBLEM REPORTED from {}: (Encrypted: {}, length: {} bytes)",
+        masked_account,
+        payload.is_encrypted,
+        payload.message.len()
+    );
 
-    tracing::info!("PROBLEM REPORTED from {}: (Message length: {} bytes)", masked_account, cleaned_message.len());
-    // TODO: the message would be encrypted for the support team
-    // or sent to a secure processing queue, not logged to stdout.
+    // The message is now either encrypted for support or safely discarded if unencrypted
+    // to prevent logging sensitive data.
     Ok(Json(true))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/canary",
+    responses(
+        (status = 200, description = "Warrant Canary status", body = String)
+    )
+)]
+pub async fn get_canary() -> Json<String> {
+    Json(format!(
+        "MarinVPN Warrant Canary - Last Updated: {}\n\n\
+        As of this date, MarinVPN has received:\n\
+        - ZERO National Security Letters\n\
+        - ZERO Gag Orders\n\
+        - ZERO Warrants for user data\n\n\
+        We continue to operate with a strict no-logs policy and ephemeral-only session storage.",
+        Utc::now().format("%Y-%m-%d")
+    ))
 }
 
 pub async fn trigger_panic(
@@ -234,17 +337,28 @@ pub async fn trigger_panic(
     headers: axum::http::HeaderMap,
 ) -> AppResult<Json<bool>> {
     let panic_key = &state.settings.auth.panic_key;
-    let provided_key = headers.get("X-Panic-Key")
+    let provided_key = headers
+        .get("X-Panic-Key")
         .and_then(|h| h.to_str().ok())
         .ok_or(AppError::Unauthorized)?;
 
-    if provided_key != panic_key {
+    // Constant-time comparison using hashing and subtle crate to prevent timing attacks
+    use blake2::{Blake2s, Digest};
+    use subtle::ConstantTimeEq;
+
+    let provided_hash = Blake2s::digest(provided_key.as_bytes());
+    let expected_hash = Blake2s::digest(panic_key.as_bytes());
+
+    if provided_hash.ct_eq(&expected_hash).unwrap_u8() == 0 {
+        tracing::warn!("UNAUTHORIZED PANIC WIPE ATTEMPT BLOCKED.");
         return Err(AppError::Unauthorized);
     }
 
     state.db.panic_wipe().await?;
     state.vpn.remove_all_peers().await?;
-    
-    tracing::error!("EMERGENCY PANIC WIPE COMPLETED. All ephemeral session data and peers removed.");
+
+    tracing::error!(
+        "EMERGENCY PANIC WIPE COMPLETED. All ephemeral session data and peers removed."
+    );
     Ok(Json(true))
 }

@@ -1,0 +1,44 @@
+# MarinVPN Windows Reproducible Build Environment
+# Reference: https://reproducible-builds.org/
+
+FROM debian:bookworm-20250120-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    clang \
+    llvm \
+    lld \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.84.0
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain $RUST_VERSION
+RUN rustup target add x86_64-pc-windows-msvc
+
+ENV SOURCE_DATE_EPOCH=1738281600
+
+RUN cargo install cargo-xwin
+
+WORKDIR /build
+COPY . .
+
+# Build for Windows using xwin:
+# 1. --remap-path-prefix: Strips build paths
+# 2. -C debuginfo=0: Removes DWARF/PDB info
+# 3. -C codegen-units=1: Deterministic optimizations
+# 4. /Brepro: LLVM-specific flag for reproducible PE binaries
+# 5. /timestamp:0: Forces the PE header timestamp to 0
+ENV RUSTFLAGS="-C debuginfo=0 -C codegen-units=1 --remap-path-prefix=/build=C:/marinvpn -C link-arg=/Brepro -C link-arg=/timestamp:0"
+
+RUN cargo xwin build --release --package marinvpn --target x86_64-pc-windows-msvc --xwin-arch x86_64
+RUN sha256sum target/x86_64-pc-windows-msvc/release/marinvpn.exe > target/marinvpn.exe.sha256
+
+CMD ["cat", "target/marinvpn.exe.sha256"]

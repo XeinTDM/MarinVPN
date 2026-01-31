@@ -1,21 +1,21 @@
 use dioxus::prelude::*;
 
-use crate::icons::{ChevronRight, Info, Check};
+use crate::icons::{Check, ChevronRight, Info};
 
 #[component]
 pub fn SettingRow(
-    label: String, 
-    checked: bool, 
-    onclick: EventHandler<MouseEvent>, 
+    label: String,
+    checked: bool,
+    onclick: EventHandler<MouseEvent>,
     id: Option<String>,
     class: Option<String>,
     show_info: Option<bool>,
     oninfo: Option<EventHandler<MouseEvent>>,
 ) -> Element {
     let class_str = class.as_deref().unwrap_or_default();
-    
+
     rsx! {
-        div { 
+        div {
             id,
             class: "flex items-center justify-between px-4 hover:bg-accent/30 cursor-pointer transition-colors shrink-0 {class_str}",
             style: "height: 48px !important; min-height: 48px !important;",
@@ -23,7 +23,7 @@ pub fn SettingRow(
             div { class: "flex items-center gap-2",
                 span { class: "font-bold text-sm text-foreground", "{label}" }
                 if show_info.unwrap_or(false) {
-                    button { 
+                    button {
                         class: "text-muted-foreground hover:text-primary transition-colors p-1",
                         onclick: move |e| {
                             e.stop_propagation();
@@ -35,10 +35,10 @@ pub fn SettingRow(
                     }
                 }
             }
-            div { 
+            div {
                 class: "w-11 h-6 rounded-full relative transition-all duration-300 flex-shrink-0",
                 class: if checked { "bg-primary shadow-lg shadow-primary/30" } else { "bg-muted" },
-                div { 
+                div {
                     class: "absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-all duration-300 shadow-sm",
                     class: if checked { "translate-x-5" } else { "" }
                 }
@@ -67,14 +67,14 @@ pub fn SettingGap(height: u32, class: Option<String>) -> Element {
 
 #[component]
 pub fn SettingAction(
-    label: String, 
-    value: Option<String>, 
+    label: String,
+    value: Option<String>,
     onclick: EventHandler<MouseEvent>,
     class: Option<String>,
 ) -> Element {
     let class_str = class.as_deref().unwrap_or_default();
     rsx! {
-        div { 
+        div {
             class: "flex items-center justify-between px-4 hover:bg-accent/30 cursor-pointer transition-colors shrink-0 {class_str}",
             style: "height: 48px !important; min-height: 48px !important;",
             onclick: move |e| onclick.call(e),
@@ -96,7 +96,7 @@ pub fn SettingSelectRow(
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
     rsx! {
-        div { 
+        div {
             class: "flex items-center justify-between px-4 hover:bg-accent/30 cursor-pointer transition-colors shrink-0",
             style: "height: 48px !important; min-height: 48px !important;",
             onclick: move |e| onclick.call(e),
@@ -115,12 +115,12 @@ pub fn SettingTitle(
     oninfo: Option<EventHandler<MouseEvent>>,
 ) -> Element {
     rsx! {
-        div { 
+        div {
             class: "flex items-center gap-2 px-4 shrink-0",
             style: "height: 48px !important; min-height: 48px !important;",
             span { class: "font-bold text-sm text-foreground", "{label}" }
             if show_info.unwrap_or(false) {
-                button { 
+                button {
                     class: "text-muted-foreground hover:text-primary transition-colors p-1",
                     onclick: move |e| {
                         e.stop_propagation();
@@ -136,13 +136,9 @@ pub fn SettingTitle(
 }
 
 #[component]
-pub fn SettingInput(
-    label: String,
-    value: String,
-    oninput: EventHandler<FormEvent>,
-) -> Element {
+pub fn SettingInput(label: String, value: String, oninput: EventHandler<FormEvent>) -> Element {
     rsx! {
-        div { 
+        div {
             class: "flex items-center justify-between px-4 shrink-0",
             style: "height: 48px !important; min-height: 48px !important;",
             span { class: "font-bold text-sm text-foreground", "{label}" }
@@ -165,7 +161,7 @@ pub fn SettingCollapsible(
     id: Option<String>,
 ) -> Element {
     rsx! {
-        div { 
+        div {
             id,
             class: "flex items-center justify-between px-4 hover:bg-accent/30 cursor-pointer transition-colors shrink-0",
             style: "height: 48px !important; min-height: 48px !important;",
@@ -173,7 +169,7 @@ pub fn SettingCollapsible(
             div { class: "flex items-center gap-2",
                 span { class: "font-bold text-sm text-foreground", "{label}" }
                 if show_info.unwrap_or(false) {
-                    button { 
+                    button {
                         class: "text-muted-foreground hover:text-primary transition-colors p-1",
                         onclick: move |e| {
                             e.stop_propagation();
@@ -185,7 +181,7 @@ pub fn SettingCollapsible(
                     }
                 }
             }
-            div { 
+            div {
                 class: "mr-2 text-muted-foreground transition-transform duration-300",
                 class: if expanded { "rotate-180" } else { "" },
                 crate::icons::ChevronDown { size: 14 }
@@ -197,7 +193,7 @@ pub fn SettingCollapsible(
 #[component]
 pub fn MenuRow(label: String, icon: Element, onclick: EventHandler<MouseEvent>) -> Element {
     rsx! {
-        div { 
+        div {
             class: "flex items-center justify-between px-4 hover:bg-accent/30 cursor-pointer transition-colors group shrink-0",
             style: "height: 48px !important; min-height: 48px !important;",
             onclick: move |e| onclick.call(e),

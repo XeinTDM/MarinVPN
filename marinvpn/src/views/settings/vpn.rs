@@ -1,7 +1,7 @@
-use dioxus::prelude::*;
-use crate::state::ConnectionState;
-use crate::models::IpVersion;
 use crate::components::*;
+use crate::models::IpVersion;
+use crate::state::ConnectionState;
+use dioxus::prelude::*;
 
 #[component]
 pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
@@ -82,7 +82,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                             "This built-in feature prevents your traffic from leaking outside of the VPN tunnel if your network suddenly stops working or if the tunnel fails, it does this by blocking your traffic until your connection is reestablished."
                         }
                         p {
-                            "The difference between the Kill Switch and Lockdown Mode is that the Kill Switch will prevent any leaks from happening during automatic tunnel reconnects, software crashes and similar accidents. With Lockdown Mode enabled, you must be connected to a Mullvad VPN server to be able to reach the internet. Manually disconnecting or quitting the app will block your connection."
+                            "The difference between the Kill Switch and Lockdown Mode is that the Kill Switch will prevent any leaks from happening during automatic tunnel reconnects, software crashes and similar accidents. With Lockdown Mode enabled, you must be connected to a Marin VPN server to be able to reach the internet. Manually disconnecting or quitting the app will block your connection."
                         }
                     },
                 }
@@ -97,7 +97,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                             "The difference between the Kill Switch and Lockdown Mode is that the Kill Switch will prevent any leaks from happening during automatic tunnel reconnects, software crashes and similar accidents."
                         }
                         p {
-                            "With Lockdown Mode enabled, you must be connected to a Mullvad VPN server to be able to reach the internet. Manually disconnecting or quitting the app will block your connection."
+                            "With Lockdown Mode enabled, you must be connected to a Marin VPN server to be able to reach the internet. Manually disconnecting or quitting the app will block your connection."
                         }
                     },
                 }
@@ -245,7 +245,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                             oninput: move |e| {
                                 let val = e.value();
                                 state.settings.with_mut(|s| s.custom_dns_server = val);
-                            }
+                            },
                         }
                     }
                 }
@@ -269,39 +269,47 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                 SettingGap { height: 20, class: Some("!border-t-0".to_string()) }
             }
 
-                // Lockdown mode
-                div { class: "flex flex-col",
-                    SettingRow {
-                        id: "lockdown-mode",
-                        label: i18n.tr("lockdown_mode").to_string(),
-                        show_info: true,
-                        oninfo: move |_| show_lockdown_info.set(true),
-                        checked: s.lockdown_mode,
-                        onclick: move |_| {
-                            state.settings.with_mut(|s| s.lockdown_mode = !s.lockdown_mode);
-                        },
-                    }
-                    SettingDescription { text: "Blocks the Internet after you click on Disconnect or Quit. Always requires a VPN connection to reach the Internet.".to_string() }
-                    SettingGap { height: 17, class: Some("!border-t-0".to_string()) }
+            // Lockdown mode
+            div { class: "flex flex-col",
+                SettingRow {
+                    id: "lockdown-mode",
+                    label: i18n.tr("lockdown_mode").to_string(),
+                    show_info: true,
+                    oninfo: move |_| show_lockdown_info.set(true),
+                    checked: s.lockdown_mode,
+                    onclick: move |_| {
+                        state.settings.with_mut(|s| s.lockdown_mode = !s.lockdown_mode);
+                    },
                 }
+                SettingDescription {
+                    text: "Blocks the Internet after you click on Disconnect or Quit. Always requires a VPN connection to reach the Internet."
+                        .to_string(),
+                }
+                SettingGap { height: 17, class: Some("!border-t-0".to_string()) }
+            }
             // Anti-censorship
             div { class: "flex flex-col",
                 SettingAction {
                     label: i18n.tr("anti_censorship").to_string(),
-                    value: Some(match s.stealth_mode {
-                        crate::models::StealthMode::Automatic => "Automatic".to_string(),
-                        crate::models::StealthMode::WireGuardPort => "Port 53".to_string(),
-                        crate::models::StealthMode::Lwo => "LWO".to_string(),
-                        crate::models::StealthMode::Quic => "QUIC".to_string(),
-                        crate::models::StealthMode::Shadowsocks => "Shadowsocks".to_string(),
-                        crate::models::StealthMode::Tcp => "TCP".to_string(),
-                        crate::models::StealthMode::None => i18n.tr("none").to_string(),
-                    }),
+                    value: Some(
+                        match s.stealth_mode {
+                            crate::models::StealthMode::Automatic => "Automatic".to_string(),
+                            crate::models::StealthMode::WireGuardPort => "Port 53".to_string(),
+                            crate::models::StealthMode::Lwo => "LWO".to_string(),
+                            crate::models::StealthMode::Quic => "QUIC".to_string(),
+                            crate::models::StealthMode::Shadowsocks => "Shadowsocks".to_string(),
+                            crate::models::StealthMode::Tcp => "TCP".to_string(),
+                            crate::models::StealthMode::None => i18n.tr("none").to_string(),
+                        },
+                    ),
                     onclick: move |_| {
                         nav.push(crate::Route::AntiCensorshipSettings {});
                     },
                 }
-                SettingDescription { text: "Hides the fact that you are using a VPN by mimicking regular internet traffic.".to_string() }
+                SettingDescription {
+                    text: "Hides the fact that you are using a VPN by mimicking regular internet traffic."
+                        .to_string(),
+                }
                 SettingGap { height: 17, class: Some("!border-t-0".to_string()) }
             }
 

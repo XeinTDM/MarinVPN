@@ -132,14 +132,15 @@ pub struct RemoveDeviceRequest {
     pub device_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "validation", derive(Validate))]
 pub struct ReportRequest {
     #[cfg_attr(feature = "validation", validate(length(min = 16, max = 19)))]
     pub account_number: String,
-    #[cfg_attr(feature = "validation", validate(length(min = 1, max = 1000)))]
+    #[cfg_attr(feature = "validation", validate(length(min = 1, max = 2000)))]
     pub message: String,
+    pub is_encrypted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
