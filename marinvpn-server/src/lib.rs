@@ -1,10 +1,16 @@
 use axum::{
+    body::{to_bytes, Body},
     extract::State,
     routing::{get, post},
     Router,
 };
 use axum_prometheus::PrometheusMetricLayer;
+use base64::Engine;
+use once_cell::sync::Lazy;
+use ring::signature::{UnparsedPublicKey, ED25519};
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::{
@@ -26,8 +32,8 @@ pub mod vpn_config;
 
 use marinvpn_common::{
     Account, AnonymousConfigRequest, BlindTokenRequest, BlindTokenResponse, ConfigRequest, Device,
-    ErrorResponse, GenerateResponse, LoginRequest, LoginResponse, RemoveDeviceRequest,
-    ReportRequest, VpnServer, WireGuardConfig,
+    ErrorResponse, GenerateResponse, LoginRequest, LoginResponse, RefreshRequest, RefreshResponse,
+    RemoveDeviceRequest, ReportRequest, VpnServer, WireGuardConfig,
 };
 
 pub struct AppState {
@@ -37,6 +43,23 @@ pub struct AppState {
     pub signer: services::auth::BlindSigner,
     pub support_key: services::auth::SupportKey,
 }
+
+#[derive(Clone, Debug)]
+struct AdminGuardConfig {
+    admin_token: String,
+    allowlist: Vec<String>,
+    trusted_proxy_hops: u8,
+    trusted_proxy_cidrs: Vec<String>,
+}
+
+static ADMIN_GUARD: Lazy<RwLock<AdminGuardConfig>> = Lazy::new(|| {
+    RwLock::new(AdminGuardConfig {
+        admin_token: String::new(),
+        allowlist: Vec::new(),
+        trusted_proxy_hops: 0,
+        trusted_proxy_cidrs: Vec::new(),
+    })
+});
 
 #[derive(OpenApi)]
 #[openapi(
@@ -48,6 +71,7 @@ pub struct AppState {
         handlers::auth::get_blind_public_key,
         handlers::auth::get_support_public_key,
         handlers::auth::issue_blind_token,
+        handlers::auth::refresh_token,
         handlers::vpn::get_vpn_config,
         handlers::vpn::get_anonymous_config,
         handlers::vpn::report_problem,
@@ -67,6 +91,8 @@ pub struct AppState {
             LoginResponse,
             GenerateResponse,
             BlindTokenResponse,
+            RefreshRequest,
+            RefreshResponse,
             ErrorResponse,
             WireGuardConfig,
         )
@@ -110,6 +136,31 @@ pub async fn run() {
         signer,
         support_key,
     });
+
+    {
+        let mut guard = ADMIN_GUARD.write().expect("admin guard lock poisoned");
+        guard.admin_token = settings.server.admin_token.clone();
+        guard.allowlist = settings.server.metrics_allowlist.clone();
+        guard.trusted_proxy_hops = settings.server.trusted_proxy_hops;
+        guard.trusted_proxy_cidrs = settings.server.trusted_proxy_cidrs.clone();
+    }
+
+    #[cfg(unix)]
+    {
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut hup) = signal(SignalKind::hangup()) {
+                loop {
+                    hup.recv().await;
+                    if let Some(new_cfg) = reload_admin_guard_from_env() {
+                        let mut guard = ADMIN_GUARD.write().expect("admin guard lock poisoned");
+                        *guard = new_cfg;
+                        tracing::info!("Reloaded admin guard configuration from env");
+                    }
+                }
+            }
+        });
+    }
 
     let cleanup_state = state.clone();
     tokio::spawn(async move {
@@ -198,10 +249,13 @@ pub async fn run() {
         addr
     );
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .unwrap();
 }
 
 pub fn api_routes() -> Router<Arc<AppState>> {
@@ -219,6 +273,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
             get(handlers::auth::get_support_public_key),
         )
         .route("/auth/issue-token", post(handlers::auth::issue_blind_token))
+        .route("/auth/refresh", post(handlers::auth::refresh_token))
         .route("/vpn/servers", get(handlers::vpn::get_servers))
         .route("/vpn/config", post(handlers::vpn::get_vpn_config))
         .route(
@@ -239,21 +294,90 @@ async fn verify_client_attestation(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, error::AppError> {
-    let secret = &state.settings.auth.attestation_secret;
-
-    let path = req.uri().path();
-    if path == "/health" || path.starts_with("/swagger-ui") || path.starts_with("/api-docs") {
+    let (req_parts, body) = req.into_parts();
+    let path = req_parts.uri.path();
+    if path == "/health" {
+        let req = axum::extract::Request::from_parts(req_parts, body);
         return Ok(next.run(req).await);
     }
 
-    let attestation = req
-        .headers()
+    if path == "/metrics" || path.starts_with("/swagger-ui") || path.starts_with("/api-docs") {
+        let (admin_token, allowlist, trusted_proxy_hops, trusted_proxy_cidrs) = {
+            let guard = ADMIN_GUARD.read().expect("admin guard lock poisoned");
+            (
+                guard.admin_token.clone(),
+                guard.allowlist.clone(),
+                guard.trusted_proxy_hops,
+                guard.trusted_proxy_cidrs.clone(),
+            )
+        };
+
+        if !allowlist.is_empty()
+            && !is_metrics_ip_allowed(
+                &req_parts,
+                &allowlist,
+                trusted_proxy_hops,
+                &trusted_proxy_cidrs,
+            )
+        {
+            return Err(error::AppError::Unauthorized);
+        }
+
+        let provided = req_parts
+            .headers
+            .get("X-Admin-Token")
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                req_parts
+                    .headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .map(|s| s.to_string())
+            })
+            .ok_or(error::AppError::Unauthorized)?;
+
+        use subtle::ConstantTimeEq;
+        if admin_token
+            .as_bytes()
+            .ct_eq(provided.as_bytes())
+            .unwrap_u8()
+            == 0
+        {
+            return Err(error::AppError::Unauthorized);
+        }
+
+        let req = axum::extract::Request::from_parts(req_parts, body);
+        return Ok(next.run(req).await);
+    }
+
+    let body_bytes = to_bytes(body, state.settings.server.max_body_bytes)
+        .await
+        .map_err(|_| error::AppError::Unauthorized)?;
+    let body_hash = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(&body_bytes))
+    };
+
+    let attestation = req_parts
+        .headers
         .get("X-Marin-Attestation")
         .and_then(|h| h.to_str().ok())
         .ok_or(error::AppError::Unauthorized)?;
+    let provided_body_hash = req_parts
+        .headers
+        .get("X-Marin-Attestation-Body")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    let provided_pubkey = req_parts
+        .headers
+        .get("X-Marin-Attestation-Pub")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
 
-    let parts: Vec<&str> = attestation.split(':').collect();
-    if parts.len() != 3 {
+    let att_parts: Vec<&str> = attestation.split(':').collect();
+    if att_parts.len() != 3 {
         tracing::warn!(
             "Blocked request with invalid attestation format from {}",
             path
@@ -261,9 +385,9 @@ async fn verify_client_attestation(
         return Err(error::AppError::Unauthorized);
     }
 
-    let timestamp_str = parts[0];
-    let nonce = parts[1];
-    let provided_sig = parts[2];
+    let timestamp_str = att_parts[0];
+    let nonce = att_parts[1];
+    let provided_sig = att_parts[2];
 
     let timestamp = timestamp_str
         .parse::<i64>()
@@ -279,12 +403,97 @@ async fn verify_client_attestation(
         return Err(error::AppError::Unauthorized);
     }
 
+    if is_production() && provided_body_hash.is_none() {
+        tracing::warn!("Blocked request missing attestation body hash to {}", path);
+        return Err(error::AppError::Unauthorized);
+    }
+
+    if let Some(ref provided) = provided_body_hash {
+        if provided != &body_hash {
+            tracing::warn!("Blocked request with body hash mismatch to {}", path);
+            return Err(error::AppError::Unauthorized);
+        }
+    }
+
     if state.db.is_attestation_id_used(nonce).await? {
         tracing::warn!(
             "Blocked replayed client request (nonce: {}) to {}",
             nonce,
             path
         );
+        return Err(error::AppError::Unauthorized);
+    }
+
+    let mut device_pubkey = None;
+    if let Some(auth_header) = req_parts
+        .headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+    {
+        if let Some(token) = auth_header.strip_prefix("Bearer ") {
+            if let Ok(claims) =
+                crate::services::auth::decode_access_token(token, &state.settings.auth.jwt_secret)
+            {
+                device_pubkey = state
+                    .db
+                    .get_device_pubkey(&claims.sub, &claims.device)
+                    .await?;
+                if is_production() && device_pubkey.is_none() {
+                    tracing::warn!(
+                        "Blocked request with no device pubkey on file for {}",
+                        claims.sub
+                    );
+                    return Err(error::AppError::Unauthorized);
+                }
+                if let (Some(ref stored), Some(ref provided)) = (&device_pubkey, &provided_pubkey) {
+                    if stored != provided {
+                        tracing::warn!(
+                            "Blocked request with mismatched device pubkey for {}",
+                            claims.sub
+                        );
+                        return Err(error::AppError::Unauthorized);
+                    }
+                }
+            }
+        }
+    }
+
+    if device_pubkey.is_none() {
+        device_pubkey = provided_pubkey.clone();
+    }
+
+    if is_production() && device_pubkey.is_none() {
+        tracing::warn!("Blocked request missing device pubkey to {}", path);
+        return Err(error::AppError::Unauthorized);
+    }
+
+    if let Some(ref pubkey_b64) = device_pubkey {
+        let pubkey_bytes = base64::engine::general_purpose::STANDARD
+            .decode(pubkey_b64)
+            .map_err(|_| error::AppError::Unauthorized)?;
+        let sig_bytes = base64::engine::general_purpose::STANDARD
+            .decode(provided_sig)
+            .map_err(|_| error::AppError::Unauthorized)?;
+
+        let message = format!(
+            "{}:{}:{}:{}:{}",
+            timestamp_str,
+            nonce,
+            req_parts.method.as_str(),
+            path,
+            body_hash
+        );
+
+        let verifier = UnparsedPublicKey::new(&ED25519, pubkey_bytes);
+        if verifier.verify(message.as_bytes(), &sig_bytes).is_err() {
+            tracing::warn!(
+                "Blocked unauthorized client request to {} (Signature mismatch)",
+                path
+            );
+            return Err(error::AppError::Unauthorized);
+        }
+    } else {
+        tracing::warn!("Blocked request missing device pubkey to {}", path);
         return Err(error::AppError::Unauthorized);
     }
 
@@ -297,24 +506,110 @@ async fn verify_client_attestation(
         return Err(e);
     }
 
-    use blake2::{Blake2s, Digest};
-    let mut hasher = Blake2s::new();
-    hasher.update(secret.as_bytes());
-    hasher.update(timestamp_str.as_bytes());
-    hasher.update(nonce.as_bytes());
-    hasher.update(req.method().as_str().as_bytes());
-    hasher.update(path.as_bytes());
-    let expected_sig = hex::encode(hasher.finalize());
+    let req = axum::extract::Request::from_parts(req_parts, Body::from(body_bytes));
+    Ok(next.run(req).await)
+}
 
-    if provided_sig != expected_sig {
-        tracing::warn!(
-            "Blocked unauthorized client request to {} (Signature mismatch)",
-            path
-        );
-        return Err(error::AppError::Unauthorized);
+fn is_metrics_ip_allowed(
+    req_parts: &axum::http::request::Parts,
+    allowlist: &[String],
+    trusted_proxy_hops: u8,
+    trusted_proxy_cidrs: &[String],
+) -> bool {
+    let ip = match extract_client_ip(req_parts, trusted_proxy_hops, trusted_proxy_cidrs) {
+        Some(addr) => addr,
+        None => return false,
+    };
+
+    allowlist
+        .iter()
+        .any(|allowed| match allowed.parse::<IpAddr>() {
+            Ok(addr) => addr == ip,
+            Err(_) => match allowed.parse::<ipnet::IpNet>() {
+                Ok(net) => net.contains(&ip),
+                Err(_) => false,
+            },
+        })
+}
+
+fn extract_client_ip(
+    req_parts: &axum::http::request::Parts,
+    trusted_proxy_hops: u8,
+    trusted_proxy_cidrs: &[String],
+) -> Option<IpAddr> {
+    let peer_ip = req_parts
+        .extensions
+        .get::<axum::extract::connect_info::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+
+    if trusted_proxy_hops > 0
+        && peer_ip.is_some()
+        && is_ip_in_cidrs(peer_ip.unwrap(), trusted_proxy_cidrs)
+    {
+        if let Some(forwarded) = req_parts
+            .headers
+            .get("X-Forwarded-For")
+            .and_then(|h| h.to_str().ok())
+        {
+            let parts: Vec<&str> = forwarded.split(',').map(|s| s.trim()).collect();
+            if !parts.is_empty() {
+                let idx = parts
+                    .len()
+                    .saturating_sub(trusted_proxy_hops as usize)
+                    .saturating_sub(1);
+                if let Some(ip_str) = parts.get(idx).or_else(|| parts.first()) {
+                    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
     }
 
-    Ok(next.run(req).await)
+    peer_ip
+}
+
+fn is_ip_in_cidrs(ip: IpAddr, cidrs: &[String]) -> bool {
+    if cidrs.is_empty() {
+        return false;
+    }
+    cidrs.iter().any(|allowed| match allowed.parse::<IpAddr>() {
+        Ok(addr) => addr == ip,
+        Err(_) => match allowed.parse::<ipnet::IpNet>() {
+            Ok(net) => net.contains(&ip),
+            Err(_) => false,
+        },
+    })
+}
+
+#[cfg(unix)]
+fn reload_admin_guard_from_env() -> Option<AdminGuardConfig> {
+    let token = std::env::var("APP__SERVER__ADMIN_TOKEN").ok()?;
+    let allowlist = std::env::var("APP__SERVER__METRICS_ALLOWLIST")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    let trusted_proxy_hops = std::env::var("APP__SERVER__TRUSTED_PROXY_HOPS")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(0);
+    let trusted_proxy_cidrs = std::env::var("APP__SERVER__TRUSTED_PROXY_CIDRS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+
+    Some(AdminGuardConfig {
+        admin_token: token,
+        allowlist,
+        trusted_proxy_hops,
+        trusted_proxy_cidrs,
+    })
 }
 
 async fn shutdown_signal() {
@@ -341,4 +636,11 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("Shutting down gracefully...");
+}
+
+fn is_production() -> bool {
+    let run_mode = std::env::var("RUN_MODE").unwrap_or_else(|_| "development".to_string());
+    let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "".to_string());
+    matches!(run_mode.to_lowercase().as_str(), "production" | "prod")
+        || matches!(app_env.to_lowercase().as_str(), "production" | "prod")
 }

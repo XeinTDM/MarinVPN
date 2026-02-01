@@ -68,7 +68,6 @@ pub async fn get_anonymous_config(
     }
 
     if let Err(e) = state.db.mark_token_used(&payload.message).await {
-        // If it's a unique constraint violation, it means another request just used this token
         if let AppError::Database(sqlx::Error::Database(db_err)) = &e {
             if db_err.is_unique_violation() {
                 return Err(AppError::BadRequest(
@@ -308,8 +307,6 @@ pub async fn report_problem(
         payload.message.len()
     );
 
-    // The message is now either encrypted for support or safely discarded if unencrypted
-    // to prevent logging sensitive data.
     Ok(Json(true))
 }
 
@@ -342,7 +339,6 @@ pub async fn trigger_panic(
         .and_then(|h| h.to_str().ok())
         .ok_or(AppError::Unauthorized)?;
 
-    // Constant-time comparison using hashing and subtle crate to prevent timing attacks
     use blake2::{Blake2s, Digest};
     use subtle::ConstantTimeEq;
 

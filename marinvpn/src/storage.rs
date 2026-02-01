@@ -9,6 +9,8 @@ use tracing::{error, info};
 
 const KEYRING_SERVICE: &str = "marinvpn";
 const CONFIG_FILENAME: &str = "marinvpn_config.json";
+const DEVICE_KEYRING_KEY: &str = "device_attestation_key";
+const REFRESH_TOKEN_KEY: &str = "refresh_token";
 
 #[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
 pub struct AppConfig {
@@ -18,6 +20,8 @@ pub struct AppConfig {
     pub account_number: Option<String>,
     #[serde(skip)]
     pub auth_token: Option<String>,
+    #[serde(skip)]
+    pub refresh_token: Option<String>,
     pub account_expiry: Option<i64>,
     pub device_name: Option<String>,
 }
@@ -48,6 +52,14 @@ fn get_account_entry() -> Result<Entry, keyring::Error> {
 
 fn get_token_entry() -> Result<Entry, keyring::Error> {
     Entry::new(KEYRING_SERVICE, "auth_token")
+}
+
+fn get_refresh_entry() -> Result<Entry, keyring::Error> {
+    Entry::new(KEYRING_SERVICE, REFRESH_TOKEN_KEY)
+}
+
+fn get_device_key_entry() -> Result<Entry, keyring::Error> {
+    Entry::new(KEYRING_SERVICE, DEVICE_KEYRING_KEY)
 }
 
 pub fn load_config() -> AppConfig {
@@ -98,6 +110,12 @@ pub fn load_config() -> AppConfig {
         }
     }
 
+    if let Ok(entry) = get_refresh_entry() {
+        if let Ok(pwd) = entry.get_password() {
+            config.refresh_token = Some(pwd);
+        }
+    }
+
     config
 }
 
@@ -118,6 +136,14 @@ pub fn save_config(config: &AppConfig) -> std::io::Result<()> {
         }
     }
 
+    if let Ok(entry) = get_refresh_entry() {
+        if let Some(ref token) = config.refresh_token {
+            let _ = entry.set_password(token);
+        } else {
+            let _ = entry.delete_password();
+        }
+    }
+
     let path = get_config_path();
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -130,4 +156,26 @@ pub fn save_settings(settings: SettingsState) -> std::io::Result<()> {
     let mut config = load_config();
     config.settings = Some(settings);
     save_config(&config)
+}
+
+pub fn update_auth_tokens(
+    auth_token: Option<String>,
+    refresh_token: Option<String>,
+) -> std::io::Result<()> {
+    let mut config = load_config();
+    config.auth_token = auth_token;
+    config.refresh_token = refresh_token;
+    save_config(&config)
+}
+
+pub fn load_device_attestation_key() -> Option<String> {
+    get_device_key_entry()
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
+}
+
+pub fn save_device_attestation_key(key: &str) {
+    if let Ok(entry) = get_device_key_entry() {
+        let _ = entry.set_password(key);
+    }
 }

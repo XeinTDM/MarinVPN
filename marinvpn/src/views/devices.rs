@@ -32,8 +32,7 @@ pub fn Devices() -> Element {
                                     let name = device.name.clone();
                                     let name_for_action = name.clone();
                                     let is_current = name == (state.device_name)();
-                                    let dt = chrono::DateTime::from_timestamp(device.added_at, 0).unwrap_or_default();
-                                    let date_str = dt.format("%b %d, %Y").to_string();
+                                    let date_str = device.created_date.clone();
                                     let display_msg = if is_current { format!("Added on {} (Now)", date_str) } else { format!("Added on {}", date_str) };
                                     let acc_for_remove = account_number.clone();
                                     let token_for_remove = auth_token.clone();

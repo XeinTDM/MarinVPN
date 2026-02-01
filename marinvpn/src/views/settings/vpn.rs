@@ -1,4 +1,5 @@
 use crate::components::*;
+use crate::icons::CircleAlert;
 use crate::models::IpVersion;
 use crate::state::ConnectionState;
 use dioxus::prelude::*;
@@ -14,6 +15,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
     let mut show_ipv6_info = use_signal(|| false);
     let mut show_kill_switch_info = use_signal(|| false);
     let mut show_lockdown_info = use_signal(|| false);
+    let mut show_lockdown_confirm = use_signal(|| false);
     let mut show_quantum_info = use_signal(|| false);
     let mut show_ip_version_info = use_signal(|| false);
 
@@ -100,6 +102,38 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                             "With Lockdown Mode enabled, you must be connected to a Marin VPN server to be able to reach the internet. Manually disconnecting or quitting the app will block your connection."
                         }
                     },
+                }
+            }
+
+            if show_lockdown_confirm() {
+                Modal {
+                    title: "Attention".to_string(),
+                    onclose: move |_| show_lockdown_confirm.set(false),
+                    children: rsx! {
+                        div { class: "flex items-start gap-3 mb-4",
+                            div { class: "w-9 h-9 rounded-full bg-destructive/10 flex items-center justify-center",
+                                CircleAlert { size: 20, class: Some("text-destructive".to_string()) }
+                            }
+                            div { class: "text-xs text-muted-foreground leading-relaxed",
+                                "Attention: enabling this will always require a\nMarin VPN connection in order to reach\nthe internet.\n\nThe app's built-in kill switch is always on.\nThis setting will additionally block the\ninternet if clicking Disconnect or Quit."
+                            }
+                        }
+                        div { class: "flex flex-col gap-2",
+                            button {
+                                class: "w-full h-11 bg-destructive text-destructive-foreground font-bold rounded-xl hover:opacity-90 transition-all active:scale-95",
+                                onclick: move |_| {
+                                    state.settings.with_mut(|s| s.lockdown_mode = true);
+                                    show_lockdown_confirm.set(false);
+                                },
+                                "Enable anyway"
+                            }
+                            button {
+                                class: "w-full h-10 border border-border text-foreground font-semibold rounded-xl hover:bg-accent/40 transition-all active:scale-95",
+                                onclick: move |_| show_lockdown_confirm.set(false),
+                                "Back"
+                            }
+                        }
+                    }
                 }
             }
 
@@ -278,7 +312,11 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                     oninfo: move |_| show_lockdown_info.set(true),
                     checked: s.lockdown_mode,
                     onclick: move |_| {
-                        state.settings.with_mut(|s| s.lockdown_mode = !s.lockdown_mode);
+                        if s.lockdown_mode {
+                            state.settings.with_mut(|s| s.lockdown_mode = false);
+                        } else {
+                            show_lockdown_confirm.set(true);
+                        }
                     },
                 }
                 SettingDescription {

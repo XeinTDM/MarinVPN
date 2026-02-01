@@ -10,11 +10,14 @@ use rsa::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub exp: usize,
+    pub device: String,
+    pub kind: String,
 }
 
 pub struct BlindSigner {
@@ -23,11 +26,15 @@ pub struct BlindSigner {
 
 impl BlindSigner {
     pub fn new() -> Self {
-        let key_path = "blind_signer.pem";
+        let key_path = resolve_key_path("blind_signer.pem");
+        ensure_key_dir(&key_path);
 
-        if let Ok(pem) = fs::read_to_string(key_path) {
+        if let Ok(pem) = fs::read_to_string(&key_path) {
             if let Ok(key) = RsaPrivateKey::from_pkcs8_pem(&pem) {
-                tracing::info!("Loaded existing Blind Signer RSA key from {}", key_path);
+                tracing::info!(
+                    "Loaded existing Blind Signer RSA key from {}",
+                    key_path.display()
+                );
                 return Self { key };
             }
         }
@@ -36,10 +43,10 @@ impl BlindSigner {
         let key = RsaPrivateKey::new(&mut rng, 4096).expect("failed to generate 4096-bit RSA key");
 
         if let Ok(pem) = key.to_pkcs8_pem(LineEnding::LF) {
-            let _ = fs::write(key_path, pem.as_bytes());
+            let _ = write_private_key(&key_path, pem.as_bytes());
             tracing::info!(
                 "Generated and saved new Blind Signer RSA key to {}",
-                key_path
+                key_path.display()
             );
         }
 
@@ -61,7 +68,6 @@ impl BlindSigner {
         let m = BigUint::from_bytes_be(&blinded_bytes);
         let n = self.key.n();
 
-        // Basic range checks to prevent trivial/out-of-bounds messages
         if m < BigUint::from(2u32) || m >= *n {
             return Err(AppError::BadRequest("Message out of range".to_string()));
         }
@@ -81,7 +87,6 @@ impl BlindSigner {
             Err(_) => return false,
         };
 
-        // Use a domain separator to prevent cross-protocol attacks
         let mut hasher = Blake2s::new();
         hasher.update(b"MARIN_VPN_BLIND_SIG_V1");
         hasher.update(&m_raw);
@@ -112,11 +117,15 @@ pub struct SupportKey {
 
 impl SupportKey {
     pub fn new() -> Self {
-        let key_path = "support_key.pem";
+        let key_path = resolve_key_path("support_key.pem");
+        ensure_key_dir(&key_path);
 
-        if let Ok(pem) = fs::read_to_string(key_path) {
+        if let Ok(pem) = fs::read_to_string(&key_path) {
             if let Ok(key) = RsaPrivateKey::from_pkcs8_pem(&pem) {
-                tracing::info!("Loaded existing Support RSA key from {}", key_path);
+                tracing::info!(
+                    "Loaded existing Support RSA key from {}",
+                    key_path.display()
+                );
                 return Self { key };
             }
         }
@@ -125,8 +134,11 @@ impl SupportKey {
         let key = RsaPrivateKey::new(&mut rng, 4096).expect("failed to generate 4096-bit RSA key");
 
         if let Ok(pem) = key.to_pkcs8_pem(LineEnding::LF) {
-            let _ = fs::write(key_path, pem.as_bytes());
-            tracing::info!("Generated and saved new Support RSA key to {}", key_path);
+            let _ = write_private_key(&key_path, pem.as_bytes());
+            tracing::info!(
+                "Generated and saved new Support RSA key to {}",
+                key_path.display()
+            );
         }
 
         Self { key }
@@ -146,20 +158,81 @@ impl Default for SupportKey {
     }
 }
 
-pub fn create_token(account_number: &str, secret: &str) -> AppResult<String> {
+fn resolve_key_path(filename: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var("MARIN_KEY_DIR") {
+        return PathBuf::from(dir).join(filename);
+    }
+
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(filename)
+}
+
+fn ensure_key_dir(path: &PathBuf) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+}
+
+fn write_private_key(path: &PathBuf, data: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true).mode(0o600);
+        let mut file = options.open(path)?;
+        use std::io::Write;
+        file.write_all(data)?;
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(path, data)
+    }
+}
+
+pub fn create_token(account_number: &str, device: &str, secret: &str) -> AppResult<String> {
+    let expiration = Utc::now()
+        .checked_add_signed(Duration::minutes(15))
+        .expect("valid timestamp")
+        .timestamp();
+
+    create_token_with_exp(account_number, device, secret, expiration, "access")
+}
+
+pub fn create_refresh_token(
+    account_number: &str,
+    device: &str,
+    secret: &str,
+) -> AppResult<(String, i64)> {
     let expiration = Utc::now()
         .checked_add_signed(Duration::days(30))
         .expect("valid timestamp")
         .timestamp();
 
+    let token = create_token_with_exp(account_number, device, secret, expiration, "refresh")?;
+    Ok((token, expiration))
+}
+
+fn create_token_with_exp(
+    account_number: &str,
+    device: &str,
+    secret: &str,
+    exp: i64,
+    kind: &str,
+) -> AppResult<String> {
     let normalized: String = account_number
         .chars()
         .filter(|c| !c.is_whitespace())
-        .collect();
+        .collect::<String>()
+        .to_uppercase();
 
     let claims = Claims {
         sub: normalized,
-        exp: expiration as usize,
+        exp: exp as usize,
+        device: device.to_string(),
+        kind: kind.to_string(),
     };
 
     let header = Header::new(Algorithm::HS256);
@@ -179,4 +252,20 @@ pub fn decode_token(token: &str, secret: &str) -> AppResult<Claims> {
     )
     .map(|data| data.claims)
     .map_err(|_| AppError::Unauthorized)
+}
+
+pub fn decode_access_token(token: &str, secret: &str) -> AppResult<Claims> {
+    let claims = decode_token(token, secret)?;
+    if claims.kind != "access" {
+        return Err(AppError::Unauthorized);
+    }
+    Ok(claims)
+}
+
+pub fn decode_refresh_token(token: &str, secret: &str) -> AppResult<Claims> {
+    let claims = decode_token(token, secret)?;
+    if claims.kind != "refresh" {
+        return Err(AppError::Unauthorized);
+    }
+    Ok(claims)
 }

@@ -2,6 +2,11 @@
 port = 3000
 host = "0.0.0.0"
 log_level = "info"
+max_body_bytes = 262144
+admin_token = ""
+metrics_allowlist = []
+trusted_proxy_hops = 0
+trusted_proxy_cidrs = []
 
 [database]
-url = "sqlite:marinvpn.db"
+url = "postgres://marinvpn:marinvpn@127.0.0.1:5432/marinvpn"

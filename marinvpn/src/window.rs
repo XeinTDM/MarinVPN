@@ -14,10 +14,18 @@ pub const WINDOW_HEIGHT: f64 = 560.0;
 
 pub static TRAY_UPDATE_SENDER: OnceLock<tokio::sync::mpsc::UnboundedSender<String>> =
     OnceLock::new();
+pub static TRAY_ICON_SENDER: OnceLock<tokio::sync::mpsc::UnboundedSender<Option<String>>> =
+    OnceLock::new();
 
 pub fn update_tray_tooltip(tooltip: &str) {
     if let Some(sender) = TRAY_UPDATE_SENDER.get() {
         let _ = sender.send(tooltip.to_string());
+    }
+}
+
+pub fn update_tray_icon_path(path: Option<&str>) {
+    if let Some(sender) = TRAY_ICON_SENDER.get() {
+        let _ = sender.send(path.map(|p| p.to_string()));
     }
 }
 
@@ -29,6 +37,11 @@ pub fn use_tray_management() {
     let rx_holder = use_hook(|| {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let _ = TRAY_UPDATE_SENDER.set(tx);
+        Arc::new(Mutex::new(Some(rx)))
+    });
+    let icon_rx_holder = use_hook(|| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+        let _ = TRAY_ICON_SENDER.set(tx);
         Arc::new(Mutex::new(Some(rx)))
     });
 
@@ -51,6 +64,7 @@ pub fn use_tray_management() {
     let last_focus_coroutine = last_focus_lost.clone();
 
     let rx_holder_spawn = rx_holder.clone();
+    let icon_rx_holder_spawn = icon_rx_holder.clone();
     use_hook(move || {
         spawn(async move {
             let tray = match create_tray_icon() {
@@ -67,6 +81,14 @@ pub fn use_tray_management() {
                 let (_, rx) = tokio::sync::mpsc::unbounded_channel();
                 rx
             });
+            let mut icon_rx = icon_rx_holder_spawn
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| {
+                    let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+                    rx
+                });
 
             loop {
                 while let Ok(event) = tray_channel.try_recv() {
@@ -98,6 +120,16 @@ pub fn use_tray_management() {
                     let _ = tray.set_tooltip(Some(tooltip));
                 }
 
+                while let Ok(path) = icon_rx.try_recv() {
+                    let icon = match path {
+                        Some(ref p) if !p.trim().is_empty() => {
+                            load_tray_icon_from_path(p).unwrap_or_else(default_tray_icon)
+                        }
+                        _ => default_tray_icon(),
+                    };
+                    let _ = tray.set_icon(Some(icon));
+                }
+
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         });
@@ -125,25 +157,7 @@ fn position_window_at_tray(window: &dioxus::desktop::DesktopContext, rect: Rect)
 }
 
 pub fn create_tray_icon() -> Option<TrayIcon> {
-    let icon_bytes = include_bytes!("../assets/favicon.ico");
-    let icon_image = match image::load(Cursor::new(icon_bytes), image::ImageFormat::Ico) {
-        Ok(img) => img,
-        Err(e) => {
-            error!("Failed to load tray icon image: {}", e);
-            return None;
-        }
-    };
-
-    let (width, height) = icon_image.dimensions();
-    let rgba = icon_image.into_rgba8().into_vec();
-
-    let icon = match Icon::from_rgba(rgba, width, height) {
-        Ok(i) => i,
-        Err(e) => {
-            error!("Failed to process tray icon data: {}", e);
-            return None;
-        }
-    };
+    let icon = default_tray_icon();
 
     match TrayIconBuilder::new()
         .with_tooltip("MarinVPN")
@@ -156,4 +170,23 @@ pub fn create_tray_icon() -> Option<TrayIcon> {
             None
         }
     }
+}
+
+fn default_tray_icon() -> Icon {
+    let icon_bytes = include_bytes!("../assets/favicon.ico");
+    let icon_image = image::load(Cursor::new(icon_bytes), image::ImageFormat::Ico)
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(32, 32));
+    let (width, height) = icon_image.dimensions();
+    let rgba = icon_image.into_rgba8().into_vec();
+    Icon::from_rgba(rgba, width, height).unwrap_or_else(|_| {
+        let empty = vec![0u8; (32 * 32 * 4) as usize];
+        Icon::from_rgba(empty, 32, 32).unwrap()
+    })
+}
+
+fn load_tray_icon_from_path(path: &str) -> Option<Icon> {
+    let image = image::open(path).ok()?;
+    let (width, height) = image.dimensions();
+    let rgba = image.into_rgba8().into_vec();
+    Icon::from_rgba(rgba, width, height).ok()
 }

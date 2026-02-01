@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 
 pub use marinvpn_common::{
     Account, ConfigRequest, ConnectionStatus, Device, DnsBlockingState, ErrorResponse,
-    GenerateResponse, IpVersion, LoginRequest, LoginResponse, Protocol, RemoveDeviceRequest,
-    ReportRequest, VpnServer as CommonVpnServer, WireGuardConfig,
+    GenerateResponse, IpVersion, LoginRequest, LoginResponse, Protocol, RefreshRequest,
+    RefreshResponse, RemoveDeviceRequest, ReportRequest, VpnServer as CommonVpnServer,
+    WireGuardConfig,
 };
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]
@@ -115,6 +116,10 @@ pub struct SettingsState {
     pub auto_connect: bool,
     pub local_sharing: bool,
     pub language: Language,
+    pub branding_preset: String,
+    pub branding_name: String,
+    pub branding_accent_color: String,
+    pub branding_logo_path: String,
     pub protocol: Protocol,
     pub stealth_mode: StealthMode,
     pub ipv6_support: bool,
@@ -143,6 +148,10 @@ impl Default for SettingsState {
             auto_connect: false,
             local_sharing: false,
             language: Language::English,
+            branding_preset: "custom".to_string(),
+            branding_name: "MarinVPN".to_string(),
+            branding_accent_color: "#6D28D9".to_string(),
+            branding_logo_path: "".to_string(),
             protocol: Protocol::WireGuard,
             stealth_mode: StealthMode::None,
             ipv6_support: true,

@@ -7,8 +7,8 @@ members = [
 resolver = "2"
 
 [profile.release]
-opt-level = "z"     # Optimize for size
-lto = true          # Enable Link Time Optimization
-codegen-units = 1   # Better optimizations
-panic = "abort"     # Reduce binary size
-strip = true        # Strip symbols automatically
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

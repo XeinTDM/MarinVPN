@@ -1,6 +1,6 @@
 use crate::models::{
-    Account, ConfigRequest, Device, GenerateResponse, LoginRequest, LoginResponse,
-    RemoveDeviceRequest, ReportRequest, WireGuardConfig,
+    ConfigRequest, Device, GenerateResponse, LoginRequest, LoginResponse, RefreshRequest,
+    RefreshResponse, RemoveDeviceRequest, ReportRequest, WireGuardConfig,
 };
 use base64::{prelude::BASE64_STANDARD, Engine};
 use blake2::{Blake2s, Digest as BlakeDigest};
@@ -12,9 +12,13 @@ use num_bigint_dig::traits::ModInverse;
 use num_integer::Integer;
 use once_cell::sync::Lazy;
 use rand::{thread_rng, Rng};
+use reqwest::StatusCode;
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use rsa::traits::PublicKeyParts;
 use rsa::{pkcs8::DecodePublicKey, BigUint, RsaPublicKey};
-use sha2::Sha256;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 pub struct AuthService;
 
@@ -32,11 +36,148 @@ static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .build()
         .expect("Failed to build secure reqwest client")
 });
-static API_BASE: Lazy<String> = Lazy::new(|| {
-    std::env::var("MARIN_API_URL").unwrap_or_else(|_| "http://127.0.0.1:3000/api/v1".to_string())
-});
+
+fn api_base() -> Result<String, String> {
+    let base = std::env::var("MARIN_API_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3000/api/v1".to_string());
+
+    if is_production() && base.starts_with("http://") {
+        return Err("MARIN_API_URL must be https in production".to_string());
+    }
+
+    Ok(base)
+}
+
+fn api_url(path: &str) -> Result<String, String> {
+    let base = api_base()?;
+    let base = base.trim_end_matches('/');
+    let path = path.trim_start_matches('/');
+    Ok(format!("{}/{}", base, path))
+}
+
+fn is_production() -> bool {
+    let run_mode = std::env::var("RUN_MODE").unwrap_or_else(|_| "development".to_string());
+    let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "".to_string());
+    matches!(run_mode.to_lowercase().as_str(), "production" | "prod")
+        || matches!(app_env.to_lowercase().as_str(), "production" | "prod")
+}
+
+fn device_keypair() -> Result<Ed25519KeyPair, String> {
+    if let Some(encoded) = crate::storage::load_device_attestation_key() {
+        let raw = BASE64_STANDARD
+            .decode(encoded)
+            .map_err(|_| "Invalid device attestation key in storage".to_string())?;
+        return Ed25519KeyPair::from_pkcs8(raw.as_slice())
+            .map_err(|_| "Invalid device attestation key in storage".to_string());
+    }
+
+    let rng = SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|_| "Failed to generate device attestation key".to_string())?;
+    crate::storage::save_device_attestation_key(&BASE64_STANDARD.encode(pkcs8.as_ref()));
+    Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|_| "Failed to load generated device attestation key".to_string())
+}
+
+fn device_pubkey_b64() -> Result<String, String> {
+    let key = device_keypair()?;
+    Ok(BASE64_STANDARD.encode(key.public_key().as_ref()))
+}
+
+fn body_hash_hex(bytes: &[u8]) -> String {
+    let hash = Sha256::digest(bytes);
+    hex::encode(hash)
+}
+
+fn request_with_attestation(
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Result<reqwest::RequestBuilder, String> {
+    let url = api_url(path)?;
+    let hash = match body.as_ref() {
+        Some(bytes) => body_hash_hex(bytes),
+        None => body_hash_hex(&[]),
+    };
+
+    let timestamp = chrono::Utc::now().timestamp().to_string();
+    let nonce: String = {
+        let mut rng = rand::thread_rng();
+        let n: [u8; 16] = rng.gen();
+        hex::encode(n)
+    };
+
+    let mut rb = match method {
+        "GET" => CLIENT.get(url),
+        "POST" => CLIENT.post(url),
+        _ => return Err(format!("Unsupported HTTP method: {}", method)),
+    };
+
+    if let Some(bytes) = body {
+        rb = rb
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(bytes);
+    }
+
+    let message = format!("{}:{}:{}:{}:{}", timestamp, nonce, method, path, hash);
+    let key = device_keypair()?;
+    let signature = key.sign(message.as_bytes());
+    let signature_b64 = BASE64_STANDARD.encode(signature.as_ref());
+    let pubkey_b64 = device_pubkey_b64()?;
+
+    Ok(rb
+        .header(
+            "X-Marin-Attestation",
+            format!("{}:{}:{}", timestamp, nonce, signature_b64),
+        )
+        .header("X-Marin-Attestation-Body", hash)
+        .header("X-Marin-Attestation-Pub", pubkey_b64))
+}
+
+fn json_body<T: Serialize>(payload: &T) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(payload).map_err(|e| format!("Failed to encode request body: {}", e))
+}
 
 impl AuthService {
+    async fn send_authed_with_refresh<F>(
+        token: &str,
+        make_req: F,
+    ) -> Result<reqwest::Response, String>
+    where
+        F: Fn(&str) -> Result<reqwest::RequestBuilder, String>,
+    {
+        let res = make_req(token)?
+            .send()
+            .await
+            .map_err(|e| format!("Connection error: {}", e))?;
+
+        if res.status() != StatusCode::UNAUTHORIZED {
+            return Ok(res);
+        }
+
+        let refresh = crate::storage::load_config().refresh_token;
+        let Some(refresh_token) = refresh else {
+            return Err("Session expired. Please log in again.".to_string());
+        };
+
+        let refreshed = match Self::refresh_auth(&refresh_token).await {
+            Ok(tokens) => tokens,
+            Err(err) => {
+                let _ = crate::storage::update_auth_tokens(None, None);
+                return Err(err);
+            }
+        };
+        let _ = crate::storage::update_auth_tokens(
+            Some(refreshed.auth_token.clone()),
+            Some(refreshed.refresh_token.clone()),
+        );
+
+        make_req(&refreshed.auth_token)?
+            .send()
+            .await
+            .map_err(|e| format!("Connection error: {}", e))
+    }
+
     pub async fn secure_resolve(hostname: &str) -> Option<String> {
         let doh_url = "https://cloudflare-dns.com/dns-query";
 
@@ -65,42 +206,14 @@ impl AuthService {
         None
     }
 
-    fn with_attestation(
-        rb: reqwest::RequestBuilder,
-        method: &str,
-        path: &str,
-    ) -> reqwest::RequestBuilder {
-        let secret = std::env::var("MARIN_ATTESTATION_SECRET")
-            .unwrap_or_else(|_| "marinvpn_secure_attestation_2026_top_tier".to_string());
-        let timestamp = chrono::Utc::now().timestamp().to_string();
-
-        let nonce: String = {
-            let mut rng = rand::thread_rng();
-            let n: [u8; 16] = rng.gen();
-            hex::encode(n)
-        };
-
-        let mut hasher = Blake2s::new();
-        hasher.update(secret.as_bytes());
-        hasher.update(timestamp.as_bytes());
-        hasher.update(nonce.as_bytes());
-        hasher.update(method.as_bytes());
-        hasher.update(path.as_bytes());
-        let signature = hex::encode(hasher.finalize());
-
-        rb.header(
-            "X-Marin-Attestation",
-            format!("{}:{}:{}", timestamp, nonce, signature),
-        )
-    }
     pub async fn get_anonymous_config(
         location: &str,
         token: &str,
         dns_blocking: Option<crate::models::DnsBlockingState>,
         quantum_resistant: bool,
     ) -> Result<WireGuardConfig, String> {
-        let rb = CLIENT.get(format!("{}/auth/blind-key", *API_BASE));
-        let key_pem = Self::with_attestation(rb, "GET", "/api/v1/auth/blind-key")
+        let rb = request_with_attestation("GET", "/api/v1/auth/blind-key", None)?;
+        let key_pem = rb
             .send()
             .await
             .map_err(|e| format!("Failed to get blind key: {}", e))?
@@ -134,17 +247,18 @@ impl AuthService {
         let m_prime = (hashed_m.clone() * r_pow_e) % n;
         let m_prime_base64 = BASE64_STANDARD.encode(m_prime.to_bytes_be());
 
-        let rb = CLIENT
-            .post(format!("{}/auth/issue-token", *API_BASE))
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&BlindTokenRequest {
-                blinded_message: m_prime_base64,
-            });
-
-        let res = Self::with_attestation(rb, "POST", "/api/v1/auth/issue-token")
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+        let blind_req = BlindTokenRequest {
+            blinded_message: m_prime_base64,
+        };
+        let res = Self::send_authed_with_refresh(token, |t| {
+            request_with_attestation(
+                "POST",
+                "/api/v1/auth/issue-token",
+                Some(json_body(&blind_req)?),
+            )
+            .map(|rb| rb.header("Authorization", format!("Bearer {}", t)))
+        })
+        .await?;
 
         if !res.status().is_success() {
             return Err(format!("Failed to issue blind token: {}", res.status()));
@@ -198,11 +312,13 @@ impl AuthService {
             pqc_public_key: pqc_pk_b64,
         };
 
-        let rb = CLIENT
-            .post(format!("{}/vpn/config-anonymous", *API_BASE))
-            .json(&anon_req);
+        let rb = request_with_attestation(
+            "POST",
+            "/api/v1/vpn/config-anonymous",
+            Some(json_body(&anon_req)?),
+        )?;
 
-        let res = Self::with_attestation(rb, "POST", "/api/v1/vpn/config-anonymous")
+        let res = rb
             .send()
             .await
             .map_err(|e| format!("Connection error: {}", e))?;
@@ -238,16 +354,20 @@ impl AuthService {
 
     pub async fn login(
         account_number: &str,
-        device_name: Option<String>,
-    ) -> Result<(Account, String, String), String> {
-        let rb = CLIENT
-            .post(format!("{}/account/login", *API_BASE))
-            .json(&LoginRequest {
-                account_number: account_number.to_string(),
-                device_name,
-            });
+        kick_device: Option<String>,
+    ) -> Result<LoginResponse, String> {
+        let login_req = LoginRequest {
+            account_number: account_number.to_string(),
+            device_pubkey: Some(device_pubkey_b64()?),
+            kick_device,
+        };
+        let rb = request_with_attestation(
+            "POST",
+            "/api/v1/account/login",
+            Some(json_body(&login_req)?),
+        )?;
 
-        let res = Self::with_attestation(rb, "POST", "/api/v1/account/login")
+        let res = rb
             .send()
             .await
             .map_err(|e| format!("Connection error: {}", e))?;
@@ -257,30 +377,44 @@ impl AuthService {
             .await
             .map_err(|e| format!("Server error: {}", e))?;
 
-        if data.success {
-            Ok((
-                data.account_info.unwrap(),
-                data.current_device.unwrap_or_default(),
-                data.auth_token.unwrap_or_default(),
-            ))
-        } else {
-            Err(data.error.unwrap_or_else(|| "Unknown error".to_string()))
-        }
+        Ok(data)
     }
 
-    pub async fn get_devices(account_number: &str, token: &str) -> Result<Vec<Device>, String> {
-        let rb = CLIENT
-            .post(format!("{}/account/devices", *API_BASE))
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&LoginRequest {
-                account_number: account_number.to_string(),
-                device_name: None,
-            });
+    pub async fn refresh_auth(refresh_token: &str) -> Result<RefreshResponse, String> {
+        let req = RefreshRequest {
+            refresh_token: refresh_token.to_string(),
+        };
+        let rb = request_with_attestation("POST", "/api/v1/auth/refresh", Some(json_body(&req)?))?;
 
-        let res = Self::with_attestation(rb, "POST", "/api/v1/account/devices")
+        let res = rb
             .send()
             .await
             .map_err(|e| format!("Connection error: {}", e))?;
+
+        if !res.status().is_success() {
+            return Err(format!("Server error: {}", res.status()));
+        }
+
+        res.json::<RefreshResponse>()
+            .await
+            .map_err(|e| format!("Server error: {}", e))
+    }
+
+    pub async fn get_devices(account_number: &str, token: &str) -> Result<Vec<Device>, String> {
+        let login_req = LoginRequest {
+            account_number: account_number.to_string(),
+            device_pubkey: None,
+            kick_device: None,
+        };
+        let res = Self::send_authed_with_refresh(token, |t| {
+            request_with_attestation(
+                "POST",
+                "/api/v1/account/devices",
+                Some(json_body(&login_req)?),
+            )
+            .map(|rb| rb.header("Authorization", format!("Bearer {}", t)))
+        })
+        .await?;
 
         if !res.status().is_success() {
             return Err(format!("Server error: {}", res.status()));
@@ -299,18 +433,19 @@ impl AuthService {
         device_name: &str,
         token: &str,
     ) -> Result<bool, String> {
-        let rb = CLIENT
-            .post(format!("{}/account/devices/remove", *API_BASE))
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&RemoveDeviceRequest {
-                account_number: account_number.to_string(),
-                device_name: device_name.to_string(),
-            });
-
-        let res = Self::with_attestation(rb, "POST", "/api/v1/account/devices/remove")
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+        let remove_req = RemoveDeviceRequest {
+            account_number: account_number.to_string(),
+            device_name: device_name.to_string(),
+        };
+        let res = Self::send_authed_with_refresh(token, |t| {
+            request_with_attestation(
+                "POST",
+                "/api/v1/account/devices/remove",
+                Some(json_body(&remove_req)?),
+            )
+            .map(|rb| rb.header("Authorization", format!("Bearer {}", t)))
+        })
+        .await?;
 
         let success = res
             .json::<bool>()
@@ -325,8 +460,8 @@ impl AuthService {
         message: &str,
         token: &str,
     ) -> Result<bool, String> {
-        let rb = CLIENT.get(format!("{}/auth/support-key", *API_BASE));
-        let key_pem = Self::with_attestation(rb, "GET", "/api/v1/auth/support-key")
+        let rb = request_with_attestation("GET", "/api/v1/auth/support-key", None)?;
+        let key_pem = rb
             .send()
             .await
             .map_err(|e| format!("Failed to get support key: {}", e))?
@@ -354,19 +489,16 @@ impl AuthService {
             String::new()
         };
 
-        let rb = CLIENT
-            .post(format!("{}/vpn/report", *API_BASE))
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&ReportRequest {
-                account_number: account_number.to_string(),
-                message: enc_data,
-                is_encrypted: true,
-            });
-
-        let res = Self::with_attestation(rb, "POST", "/api/v1/vpn/report")
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+        let report_req = ReportRequest {
+            account_number: account_number.to_string(),
+            message: enc_data,
+            is_encrypted: true,
+        };
+        let res = Self::send_authed_with_refresh(token, |t| {
+            request_with_attestation("POST", "/api/v1/vpn/report", Some(json_body(&report_req)?))
+                .map(|rb| rb.header("Authorization", format!("Bearer {}", t)))
+        })
+        .await?;
 
         let success = res
             .json::<bool>()
@@ -377,8 +509,8 @@ impl AuthService {
     }
 
     pub async fn generate_account_number() -> Result<String, String> {
-        let rb = CLIENT.post(format!("{}/account/generate", *API_BASE));
-        let res = Self::with_attestation(rb, "POST", "/api/v1/account/generate")
+        let rb = request_with_attestation("POST", "/api/v1/account/generate", None)?;
+        let res = rb
             .send()
             .await
             .map_err(|e| format!("Connection error: {}", e))?;
@@ -412,29 +544,26 @@ impl AuthService {
             (None, None)
         };
 
-        let rb = CLIENT
-            .post(format!("{}/vpn/config", *API_BASE))
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&ConfigRequest {
-                account_number: account_number.to_string(),
-                location: location.to_string(),
-                pub_key: pub_base64,
-                dns_blocking: dns_blocking.map(|d| marinvpn_common::DnsBlockingState {
-                    ads: d.ads,
-                    trackers: d.trackers,
-                    malware: d.malware,
-                    gambling: d.gambling,
-                    adult_content: d.adult_content,
-                    social_media: d.social_media,
-                }),
-                quantum_resistant,
-                pqc_public_key: pqc_pk_b64,
-            });
-
-        let res = Self::with_attestation(rb, "POST", "/api/v1/vpn/config")
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+        let cfg_req = ConfigRequest {
+            account_number: account_number.to_string(),
+            location: location.to_string(),
+            pub_key: pub_base64,
+            dns_blocking: dns_blocking.map(|d| marinvpn_common::DnsBlockingState {
+                ads: d.ads,
+                trackers: d.trackers,
+                malware: d.malware,
+                gambling: d.gambling,
+                adult_content: d.adult_content,
+                social_media: d.social_media,
+            }),
+            quantum_resistant,
+            pqc_public_key: pqc_pk_b64,
+        };
+        let res = Self::send_authed_with_refresh(token, |t| {
+            request_with_attestation("POST", "/api/v1/vpn/config", Some(json_body(&cfg_req)?))
+                .map(|rb| rb.header("Authorization", format!("Bearer {}", t)))
+        })
+        .await?;
 
         if !res.status().is_success() {
             let status = res.status();

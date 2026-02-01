@@ -1,12 +1,15 @@
 use crate::error::{AppError, AppResult};
 use crate::models::Device;
 use crate::AppState;
-use axum::{async_trait, extract::FromRef, extract::FromRequestParts, http::request::Parts};
+use axum::{
+    async_trait, extract::FromRef, extract::FromRequestParts, http::request::Parts, http::HeaderMap,
+};
 use axum::{extract::State, Json};
+use base64::Engine;
 use chrono::Utc;
 use marinvpn_common::{
     BlindTokenRequest, BlindTokenResponse, ErrorResponse, GenerateResponse, LoginRequest,
-    LoginResponse, RemoveDeviceRequest,
+    LoginResponse, RefreshRequest, RefreshResponse, RemoveDeviceRequest,
 };
 use rand::Rng;
 use std::sync::Arc;
@@ -14,6 +17,7 @@ use validator::Validate;
 
 pub struct AuthUser {
     pub account_number: String,
+    pub device_name: String,
 }
 
 #[utoipa::path(
@@ -98,10 +102,12 @@ where
         }
 
         let token = &auth_header[7..];
-        let claims = crate::services::auth::decode_token(token, &state.settings.auth.jwt_secret)?;
+        let claims =
+            crate::services::auth::decode_access_token(token, &state.settings.auth.jwt_secret)?;
 
         Ok(AuthUser {
             account_number: claims.sub,
+            device_name: claims.device,
         })
     }
 }
@@ -118,16 +124,7 @@ pub async fn generate_account(
 ) -> AppResult<Json<GenerateResponse>> {
     let mut attempts = 0;
     let account = loop {
-        let account_number = {
-            let mut rng = rand::thread_rng();
-            format!(
-                "{:04} {:04} {:04} {:04}",
-                rng.gen_range(0..10000),
-                rng.gen_range(0..10000),
-                rng.gen_range(0..10000),
-                rng.gen_range(0..10000)
-            )
-        };
+        let account_number = generate_account_number();
 
         match state.db.create_account(&account_number, 30).await {
             Ok(acc) => break acc,
@@ -143,22 +140,9 @@ pub async fn generate_account(
 
     let account_number = account.account_number.clone();
 
-    let name = {
-        let mut rng = rand::thread_rng();
-        let adjectives = [
-            "cold", "warm", "fast", "brave", "silent", "gentle", "wild", "smart",
-        ];
-        let nouns = [
-            "chicken", "eagle", "tiger", "river", "mountain", "forest", "breeze", "storm",
-        ];
-        format!(
-            "{} {}",
-            adjectives[rng.gen_range(0..8)],
-            nouns[rng.gen_range(0..8)]
-        )
-    };
+    let name = generate_device_name();
 
-    state.db.add_device(&account_number, &name).await?;
+    state.db.add_device(&account_number, &name, None).await?;
 
     Ok(Json(GenerateResponse { account_number }))
 }
@@ -175,11 +159,35 @@ pub async fn generate_account(
 )]
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> AppResult<Json<LoginResponse>> {
     payload
         .validate()
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    if is_production() && payload.device_pubkey.is_none() {
+        return Err(AppError::BadRequest(
+            "device_pubkey required in production".to_string(),
+        ));
+    }
+
+    if let Some(ref device_pubkey) = payload.device_pubkey {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(device_pubkey)
+            .map_err(|_| AppError::BadRequest("invalid device_pubkey".to_string()))?;
+        if decoded.len() != 32 {
+            return Err(AppError::BadRequest("invalid device_pubkey".to_string()));
+        }
+        let provided_pubkey = headers
+            .get("X-Marin-Attestation-Pub")
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string())
+            .ok_or(AppError::Unauthorized)?;
+        if provided_pubkey != *device_pubkey {
+            return Err(AppError::Unauthorized);
+        }
+    }
 
     let account = state
         .db
@@ -187,38 +195,258 @@ pub async fn login(
         .await?
         .ok_or(AppError::AccountNotFound)?;
 
+    if account.expiry_date < Utc::now().timestamp() {
+        return Err(AppError::AccountExpired);
+    }
+
     let devices = state.db.get_devices(&account.account_number).await?;
 
-    let device_name = if let Some(ref name) = payload.device_name {
-        if !devices.iter().any(|d| d.name == *name) {
-            if devices.len() >= 5 {
-                return Err(AppError::BadRequest(
-                    "Device limit reached (max 5). Please remove an existing device first."
-                        .to_string(),
-                ));
-            }
-            state.db.add_device(&account.account_number, name).await?;
-        }
-        name.clone()
+    let existing_device = if let Some(ref pubkey) = payload.device_pubkey {
+        state
+            .db
+            .get_device_by_pubkey(&account.account_number, pubkey)
+            .await?
     } else {
-        devices
-            .first()
-            .map(|d| d.name.clone())
-            .unwrap_or_else(|| "Default Device".to_string())
+        None
+    };
+
+    let device_name = if let Some(existing) = existing_device {
+        existing.name
+    } else {
+        if let Some(pubkey) = payload.device_pubkey.as_deref() {
+            if devices.len() >= 5 {
+                if let Some(legacy) = devices.iter().find(|d| d.attestation_pubkey.is_none()) {
+                    let updated = state
+                        .db
+                        .update_device_pubkey(&account.account_number, &legacy.name, pubkey)
+                        .await?;
+                    if updated {
+                        legacy.name.clone()
+                    } else {
+                        let common_devices = devices
+                            .into_iter()
+                            .map(|d| marinvpn_common::Device {
+                                name: d.name,
+                                created_date: format_utc_date(d.added_at),
+                            })
+                            .collect();
+                        return Ok(Json(LoginResponse {
+                            success: false,
+                            auth_token: None,
+                            refresh_token: None,
+                            account_info: None,
+                            current_device: None,
+                            devices: Some(common_devices),
+                            error_code: Some("DEVICE_UPDATE_FAILED".to_string()),
+                            error: Some("Failed to update device key".to_string()),
+                        }));
+                    }
+                } else if let Some(ref kick) = payload.kick_device {
+                    let removed = state
+                        .db
+                        .remove_device(&account.account_number, kick)
+                        .await?;
+                    if !removed {
+                        let common_devices = devices
+                            .into_iter()
+                            .map(|d| marinvpn_common::Device {
+                                name: d.name,
+                                created_date: format_utc_date(d.added_at),
+                            })
+                            .collect();
+                        return Ok(Json(LoginResponse {
+                            success: false,
+                            auth_token: None,
+                            refresh_token: None,
+                            account_info: None,
+                            current_device: None,
+                            devices: Some(common_devices),
+                            error_code: Some("DEVICE_NOT_FOUND".to_string()),
+                            error: Some("Device not found".to_string()),
+                        }));
+                    }
+
+                    let name = generate_device_name();
+                    state
+                        .db
+                        .add_device(&account.account_number, &name, Some(pubkey))
+                        .await?;
+                    name
+                } else {
+                    let common_devices = devices
+                        .into_iter()
+                        .map(|d| marinvpn_common::Device {
+                            name: d.name,
+                            created_date: format_utc_date(d.added_at),
+                        })
+                        .collect();
+                    return Ok(Json(LoginResponse {
+                        success: false,
+                        auth_token: None,
+                        refresh_token: None,
+                        account_info: None,
+                        current_device: None,
+                        devices: Some(common_devices),
+                        error_code: Some("DEVICE_LIMIT".to_string()),
+                        error: Some(
+                            "Device limit reached (max 5). Remove a device to continue."
+                                .to_string(),
+                        ),
+                    }));
+                }
+            } else {
+                let name = generate_device_name();
+                state
+                    .db
+                    .add_device(&account.account_number, &name, Some(pubkey))
+                    .await?;
+                name
+            }
+        } else {
+            let name = generate_device_name();
+            state
+                .db
+                .add_device(&account.account_number, &name, None)
+                .await?;
+            name
+        }
     };
 
     let token = crate::services::auth::create_token(
         &account.account_number,
+        &device_name,
         &state.settings.auth.jwt_secret,
     )?;
+    let (refresh_token, refresh_exp) = crate::services::auth::create_refresh_token(
+        &account.account_number,
+        &device_name,
+        &state.settings.auth.jwt_secret,
+    )?;
+    state
+        .db
+        .upsert_refresh_token(
+            &account.account_number,
+            &device_name,
+            &refresh_token,
+            refresh_exp,
+        )
+        .await?;
 
     Ok(Json(LoginResponse {
         success: true,
         auth_token: Some(token),
+        refresh_token: Some(refresh_token),
         account_info: Some(account),
         current_device: Some(device_name),
+        devices: None,
+        error_code: None,
         error: None,
     }))
+}
+
+fn generate_device_name() -> String {
+    let mut rng = rand::thread_rng();
+    let adjectives = [
+        "cold", "warm", "fast", "brave", "silent", "gentle", "wild", "smart",
+    ];
+    let nouns = [
+        "chicken", "eagle", "tiger", "river", "mountain", "forest", "breeze", "storm",
+    ];
+    format!(
+        "{} {}",
+        adjectives[rng.gen_range(0..8)],
+        nouns[rng.gen_range(0..8)]
+    )
+}
+
+fn generate_account_number() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    let mut raw = String::with_capacity(16);
+    for _ in 0..16 {
+        let idx = rng.gen_range(0..ALPHABET.len());
+        raw.push(ALPHABET[idx] as char);
+    }
+    format!(
+        "{} {} {} {}",
+        &raw[0..4],
+        &raw[4..8],
+        &raw[8..12],
+        &raw[12..16]
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/refresh",
+    request_body = RefreshRequest,
+    responses(
+        (status = 200, description = "Token refreshed successfully", body = RefreshResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
+    )
+)]
+pub async fn refresh_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RefreshRequest>,
+) -> AppResult<Json<RefreshResponse>> {
+    payload
+        .validate()
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    let claims = crate::services::auth::decode_refresh_token(
+        &payload.refresh_token,
+        &state.settings.auth.jwt_secret,
+    )?;
+
+    let provided_pubkey = headers
+        .get("X-Marin-Attestation-Pub")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or(AppError::Unauthorized)?;
+
+    let stored_pubkey = state
+        .db
+        .get_device_pubkey(&claims.sub, &claims.device)
+        .await?;
+    if stored_pubkey.as_deref() != Some(provided_pubkey.as_str()) {
+        return Err(AppError::Unauthorized);
+    }
+
+    let valid = state
+        .db
+        .validate_refresh_token(&claims.sub, &claims.device, &payload.refresh_token)
+        .await?;
+    if !valid {
+        return Err(AppError::Unauthorized);
+    }
+
+    let new_access = crate::services::auth::create_token(
+        &claims.sub,
+        &claims.device,
+        &state.settings.auth.jwt_secret,
+    )?;
+    let (new_refresh, refresh_exp) = crate::services::auth::create_refresh_token(
+        &claims.sub,
+        &claims.device,
+        &state.settings.auth.jwt_secret,
+    )?;
+    state
+        .db
+        .upsert_refresh_token(&claims.sub, &claims.device, &new_refresh, refresh_exp)
+        .await?;
+
+    Ok(Json(RefreshResponse {
+        auth_token: new_access,
+        refresh_token: new_refresh,
+    }))
+}
+
+fn is_production() -> bool {
+    let run_mode = std::env::var("RUN_MODE").unwrap_or_else(|_| "development".to_string());
+    let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "".to_string());
+    matches!(run_mode.to_lowercase().as_str(), "production" | "prod")
+        || matches!(app_env.to_lowercase().as_str(), "production" | "prod")
 }
 
 #[utoipa::path(
@@ -249,10 +477,17 @@ pub async fn get_devices(
         .into_iter()
         .map(|d| marinvpn_common::Device {
             name: d.name,
-            added_at: d.added_at,
+            created_date: format_utc_date(d.added_at),
         })
         .collect();
     Ok(Json(common_devices))
+}
+
+fn format_utc_date(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .unwrap_or_else(|| chrono::Utc::now())
+        .format("%Y-%m-%d")
+        .to_string()
 }
 
 #[utoipa::path(

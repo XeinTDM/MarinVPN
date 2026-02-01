@@ -4,14 +4,14 @@ use argon2::{
     password_hash::{PasswordHasher, SaltString},
     Algorithm, Argon2, Params, Version,
 };
-use chrono::Utc;
-use sqlx::{sqlite::SqlitePool, Error};
+use blake2::{Blake2s, Digest};
+use chrono::{TimeZone, Utc};
+use sqlx::{postgres::PgPoolOptions, Error, PgPool};
 use tracing::info;
 
 #[derive(Clone)]
 pub struct Database {
-    pool: SqlitePool,
-    ephemeral_pool: SqlitePool,
+    pool: PgPool,
     salt: String,
 }
 
@@ -19,11 +19,11 @@ impl Database {
     fn hash_account(&self, account_number: &str) -> String {
         let salt = SaltString::encode_b64(self.salt.as_bytes()).unwrap();
 
-        // Normalize: remove spaces and other whitespace
         let normalized: String = account_number
             .chars()
             .filter(|c| !c.is_whitespace())
-            .collect();
+            .collect::<String>()
+            .to_uppercase();
 
         let params = Params::new(15360, 2, 1, None).unwrap();
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -37,45 +37,17 @@ impl Database {
     }
 
     pub async fn new(url: &str, salt: &str) -> AppResult<Self> {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        let pool = PgPoolOptions::new()
             .max_connections(25)
             .acquire_timeout(std::time::Duration::from_secs(5))
             .idle_timeout(std::time::Duration::from_secs(600))
             .connect(url)
             .await?;
 
-        sqlx::query("PRAGMA journal_mode=WAL;")
-            .execute(&pool)
-            .await?;
-        sqlx::query("PRAGMA synchronous=NORMAL;")
-            .execute(&pool)
-            .await?;
-
-        let ephemeral_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(25)
-            .connect("sqlite::memory:")
-            .await?;
-
         sqlx::migrate!("./migrations").run(&pool).await?;
-
-        sqlx::query("CREATE TABLE IF NOT EXISTS peers (id INTEGER PRIMARY KEY, pub_key TEXT UNIQUE, assigned_ip TEXT UNIQUE, registered_at INTEGER)")
-            .execute(&ephemeral_pool).await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS used_tokens (message TEXT PRIMARY KEY, used_at INTEGER)",
-        )
-        .execute(&ephemeral_pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS attestation_ids (id TEXT PRIMARY KEY, used_at INTEGER)",
-        )
-        .execute(&ephemeral_pool)
-        .await?;
 
         Ok(Self {
             pool,
-            ephemeral_pool,
             salt: salt.to_string(),
         })
     }
@@ -91,74 +63,86 @@ impl Database {
         format!("10.{}.{}.{}/32", x, y, z)
     }
 
+    fn hash_refresh_token(token: &str) -> String {
+        let mut hasher = Blake2s::new();
+        hasher.update(token.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
     pub async fn cleanup_stale_sessions(&self, max_age_secs: i64) -> AppResult<Vec<String>> {
         let cutoff = Utc::now().timestamp() - max_age_secs;
+        let now = Utc::now().timestamp();
 
         let stale_peers: Vec<(String,)> =
-            sqlx::query_as("SELECT pub_key FROM peers WHERE registered_at < ?")
+            sqlx::query_as("SELECT pub_key FROM peers WHERE registered_at < $1")
                 .bind(cutoff)
-                .fetch_all(&self.ephemeral_pool)
+                .fetch_all(&self.pool)
                 .await?;
 
         let pub_keys: Vec<String> = stale_peers.into_iter().map(|(pk,)| pk).collect();
 
         if !pub_keys.is_empty() {
             info!(
-                "Cleaning up {} stale VPN sessions from ephemeral storage",
+                "Cleaning up {} stale VPN sessions from shared session store",
                 pub_keys.len()
             );
-            sqlx::query("DELETE FROM peers WHERE registered_at < ?")
+            sqlx::query("DELETE FROM peers WHERE registered_at < $1")
                 .bind(cutoff)
-                .execute(&self.ephemeral_pool)
-                .await?;
-
-            sqlx::query("DELETE FROM used_tokens WHERE used_at < ?")
-                .bind(cutoff)
-                .execute(&self.ephemeral_pool)
-                .await?;
-
-            sqlx::query("DELETE FROM attestation_ids WHERE used_at < ?")
-                .bind(cutoff)
-                .execute(&self.ephemeral_pool)
+                .execute(&self.pool)
                 .await?;
         }
+
+        sqlx::query("DELETE FROM used_tokens WHERE used_at < $1")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("DELETE FROM attestation_ids WHERE used_at < $1")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
 
         Ok(pub_keys)
     }
 
     pub async fn is_attestation_id_used(&self, id: &str) -> AppResult<bool> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT id FROM attestation_ids WHERE id = ?")
+        let row: Option<(String,)> = sqlx::query_as("SELECT id FROM attestation_ids WHERE id = $1")
             .bind(id)
-            .fetch_optional(&self.ephemeral_pool)
+            .fetch_optional(&self.pool)
             .await?;
         Ok(row.is_some())
     }
 
     pub async fn mark_attestation_id_used(&self, id: &str) -> AppResult<()> {
         let now = Utc::now().timestamp();
-        sqlx::query("INSERT INTO attestation_ids (id, used_at) VALUES (?, ?)")
+        sqlx::query("INSERT INTO attestation_ids (id, used_at) VALUES ($1, $2)")
             .bind(id)
             .bind(now)
-            .execute(&self.ephemeral_pool)
+            .execute(&self.pool)
             .await?;
         Ok(())
     }
 
     pub async fn is_token_used(&self, message: &str) -> AppResult<bool> {
         let row: Option<(String,)> =
-            sqlx::query_as("SELECT message FROM used_tokens WHERE message = ?")
+            sqlx::query_as("SELECT message FROM used_tokens WHERE message = $1")
                 .bind(message)
-                .fetch_optional(&self.ephemeral_pool)
+                .fetch_optional(&self.pool)
                 .await?;
         Ok(row.is_some())
     }
 
     pub async fn mark_token_used(&self, message: &str) -> AppResult<()> {
         let now = Utc::now().timestamp();
-        sqlx::query("INSERT INTO used_tokens (message, used_at) VALUES (?, ?)")
+        sqlx::query("INSERT INTO used_tokens (message, used_at) VALUES ($1, $2)")
             .bind(message)
             .bind(now)
-            .execute(&self.ephemeral_pool)
+            .execute(&self.pool)
             .await?;
         Ok(())
     }
@@ -184,7 +168,7 @@ impl Database {
         };
 
         sqlx::query(
-            "INSERT INTO accounts (account_number, expiry_date, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO accounts (account_number, expiry_date, created_at) VALUES ($1, $2, $3)",
         )
         .bind(&hashed)
         .bind(account.expiry_date)
@@ -197,11 +181,12 @@ impl Database {
 
     pub async fn get_account(&self, account_number: &str) -> AppResult<Option<Account>> {
         let hashed = self.hash_account(account_number);
-        let row: Option<(i64, i64)> =
-            sqlx::query_as("SELECT expiry_date, created_at FROM accounts WHERE account_number = ?")
-                .bind(&hashed)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT expiry_date, created_at FROM accounts WHERE account_number = $1",
+        )
+        .bind(&hashed)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.map(|(expiry, created)| Account {
             account_number: account_number.to_string(),
@@ -210,13 +195,24 @@ impl Database {
         }))
     }
 
-    pub async fn add_device(&self, account_id: &str, name: &str) -> AppResult<Device> {
-        let now = Utc::now().timestamp();
+    pub async fn add_device(
+        &self,
+        account_id: &str,
+        name: &str,
+        attestation_pubkey: Option<&str>,
+    ) -> AppResult<Device> {
+        let today = Utc::now().date_naive();
+        let now = Utc
+            .from_utc_datetime(&today.and_hms_opt(0, 0, 0).unwrap())
+            .timestamp();
         let hashed = self.hash_account(account_id);
-        sqlx::query("INSERT INTO devices (account_id, name, added_at) VALUES (?, ?, ?)")
+        sqlx::query(
+            "INSERT INTO devices (account_id, name, added_at, attestation_pubkey) VALUES ($1, $2, $3, $4)",
+        )
             .bind(&hashed)
             .bind(name)
             .bind(now)
+            .bind(attestation_pubkey)
             .execute(&self.pool)
             .await?;
 
@@ -225,36 +221,161 @@ impl Database {
             account_id: account_id.to_string(),
             name: name.to_string(),
             added_at: now,
+            attestation_pubkey: attestation_pubkey.map(|v| v.to_string()),
         })
+    }
+
+    pub async fn get_device_by_pubkey(
+        &self,
+        account_id: &str,
+        attestation_pubkey: &str,
+    ) -> AppResult<Option<Device>> {
+        let hashed = self.hash_account(account_id);
+        let row: Option<(String, i64, Option<String>)> = sqlx::query_as(
+            "SELECT name, added_at, attestation_pubkey FROM devices WHERE account_id = $1 AND attestation_pubkey = $2",
+        )
+        .bind(&hashed)
+        .bind(attestation_pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|(name, added_at, attestation_pubkey)| Device {
+            id: None,
+            account_id: account_id.to_string(),
+            name,
+            added_at,
+            attestation_pubkey,
+        }))
+    }
+
+    pub async fn upsert_refresh_token(
+        &self,
+        account_id: &str,
+        device_name: &str,
+        refresh_token: &str,
+        expires_at: i64,
+    ) -> AppResult<()> {
+        let now = Utc::now().timestamp();
+        let hashed_account = self.hash_account(account_id);
+        let token_hash = Self::hash_refresh_token(refresh_token);
+
+        sqlx::query(
+            "INSERT INTO refresh_tokens (account_id, device_name, token_hash, issued_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (account_id, device_name) DO UPDATE SET token_hash = $3, issued_at = $4, expires_at = $5",
+        )
+        .bind(&hashed_account)
+        .bind(device_name)
+        .bind(token_hash)
+        .bind(now)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn validate_refresh_token(
+        &self,
+        account_id: &str,
+        device_name: &str,
+        refresh_token: &str,
+    ) -> AppResult<bool> {
+        let hashed_account = self.hash_account(account_id);
+        let token_hash = Self::hash_refresh_token(refresh_token);
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT expires_at FROM refresh_tokens WHERE account_id = $1 AND device_name = $2 AND token_hash = $3",
+        )
+        .bind(&hashed_account)
+        .bind(device_name)
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some((expires_at,)) = row {
+            Ok(expires_at >= Utc::now().timestamp())
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub async fn revoke_refresh_tokens(
+        &self,
+        account_id: &str,
+        device_name: &str,
+    ) -> AppResult<()> {
+        let hashed_account = self.hash_account(account_id);
+        sqlx::query("DELETE FROM refresh_tokens WHERE account_id = $1 AND device_name = $2")
+            .bind(&hashed_account)
+            .bind(device_name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn get_devices(&self, account_id: &str) -> AppResult<Vec<Device>> {
         let hashed = self.hash_account(account_id);
-        let rows: Vec<(String, i64)> =
-            sqlx::query_as("SELECT name, added_at FROM devices WHERE account_id = ?")
-                .bind(&hashed)
-                .fetch_all(&self.pool)
-                .await?;
+        let rows: Vec<(String, i64, Option<String>)> = sqlx::query_as(
+            "SELECT name, added_at, attestation_pubkey FROM devices WHERE account_id = $1",
+        )
+        .bind(&hashed)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows
             .into_iter()
-            .map(|(name, added)| Device {
+            .map(|(name, added, attestation_pubkey)| Device {
                 id: None,
                 account_id: account_id.to_string(),
                 name,
                 added_at: added,
+                attestation_pubkey,
             })
             .collect())
     }
 
     pub async fn remove_device(&self, account_id: &str, name: &str) -> AppResult<bool> {
         let hashed = self.hash_account(account_id);
-        let res = sqlx::query("DELETE FROM devices WHERE account_id = ? AND name = ?")
+        let res = sqlx::query("DELETE FROM devices WHERE account_id = $1 AND name = $2")
             .bind(&hashed)
             .bind(name)
             .execute(&self.pool)
             .await?;
+        let _ = self.revoke_refresh_tokens(account_id, name).await;
         Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn update_device_pubkey(
+        &self,
+        account_id: &str,
+        name: &str,
+        attestation_pubkey: &str,
+    ) -> AppResult<bool> {
+        let hashed = self.hash_account(account_id);
+        let res = sqlx::query(
+            "UPDATE devices SET attestation_pubkey = $1 WHERE account_id = $2 AND name = $3",
+        )
+        .bind(attestation_pubkey)
+        .bind(&hashed)
+        .bind(name)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn get_device_pubkey(
+        &self,
+        account_id: &str,
+        name: &str,
+    ) -> AppResult<Option<String>> {
+        let hashed = self.hash_account(account_id);
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT attestation_pubkey FROM devices WHERE account_id = $1 AND name = $2",
+        )
+        .bind(&hashed)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(pk,)| pk))
     }
 
     pub async fn update_server_health(
@@ -263,18 +384,20 @@ impl Database {
         load: i64,
         latency: i64,
     ) -> AppResult<()> {
-        sqlx::query("UPDATE vpn_servers SET current_load = ?, avg_latency = ? WHERE endpoint = ?")
-            .bind(load)
-            .bind(latency)
-            .bind(endpoint)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE vpn_servers SET current_load = $1, avg_latency = $2 WHERE endpoint = $3",
+        )
+        .bind(load)
+        .bind(latency)
+        .bind(endpoint)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn get_servers_by_location(&self, country: &str) -> AppResult<Vec<VpnServer>> {
         Ok(sqlx::query_as::<_, VpnServer>(
-            "SELECT * FROM vpn_servers WHERE country = ? AND is_active = 1",
+            "SELECT * FROM vpn_servers WHERE country = $1 AND is_active = true",
         )
         .bind(country)
         .fetch_all(&self.pool)
@@ -283,17 +406,17 @@ impl Database {
 
     pub async fn get_active_servers(&self) -> AppResult<Vec<VpnServer>> {
         Ok(
-            sqlx::query_as::<_, VpnServer>("SELECT * FROM vpn_servers WHERE is_active = 1")
+            sqlx::query_as::<_, VpnServer>("SELECT * FROM vpn_servers WHERE is_active = true")
                 .fetch_all(&self.pool)
                 .await?,
         )
     }
 
     pub async fn get_or_create_peer(&self, pub_key: &str) -> AppResult<String> {
-        let mut tx = self.ephemeral_pool.begin().await?;
+        let mut tx = self.pool.begin().await?;
 
         let existing: Option<(String,)> =
-            sqlx::query_as("SELECT assigned_ip FROM peers WHERE pub_key = ?")
+            sqlx::query_as("SELECT assigned_ip FROM peers WHERE pub_key = $1")
                 .bind(pub_key)
                 .fetch_optional(&mut *tx)
                 .await?;
@@ -305,25 +428,22 @@ impl Database {
 
         let now = Utc::now().timestamp();
 
-        let insert_result = sqlx::query("INSERT INTO peers (pub_key, registered_at) VALUES (?, ?)")
-            .bind(pub_key)
-            .bind(now)
-            .execute(&mut *tx)
-            .await;
+        let insert_result = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO peers (pub_key, registered_at) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(pub_key)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await;
 
         let row_id = match insert_result {
-            Ok(_) => {
-                let id: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
-                    .fetch_one(&mut *tx)
-                    .await?;
-                id
-            }
+            Ok(id) => id,
             Err(Error::Database(db_err)) if db_err.is_unique_violation() => {
                 tx.rollback().await?;
                 let existing: (String,) =
-                    sqlx::query_as("SELECT assigned_ip FROM peers WHERE pub_key = ?")
+                    sqlx::query_as("SELECT assigned_ip FROM peers WHERE pub_key = $1")
                         .bind(pub_key)
-                        .fetch_one(&self.ephemeral_pool)
+                        .fetch_one(&self.pool)
                         .await?;
                 return Ok(existing.0);
             }
@@ -336,7 +456,7 @@ impl Database {
         let assigned_ip = Self::map_id_to_ip(row_id);
         info!("Allocating anonymous IP {} for public key", assigned_ip);
 
-        sqlx::query("UPDATE peers SET assigned_ip = ? WHERE id = ?")
+        sqlx::query("UPDATE peers SET assigned_ip = $1 WHERE id = $2")
             .bind(&assigned_ip)
             .bind(row_id)
             .execute(&mut *tx)
@@ -347,15 +467,16 @@ impl Database {
     }
 
     pub async fn panic_wipe(&self) -> AppResult<()> {
-        info!("CRITICAL: Panic wipe triggered. Clearing all ephemeral data.");
-        sqlx::query("DELETE FROM peers")
-            .execute(&self.ephemeral_pool)
-            .await?;
+        info!("CRITICAL: Panic wipe triggered. Clearing all ephemeral session data.");
+        sqlx::query("DELETE FROM peers").execute(&self.pool).await?;
         sqlx::query("DELETE FROM used_tokens")
-            .execute(&self.ephemeral_pool)
+            .execute(&self.pool)
             .await?;
         sqlx::query("DELETE FROM attestation_ids")
-            .execute(&self.ephemeral_pool)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM refresh_tokens")
+            .execute(&self.pool)
             .await?;
         Ok(())
     }

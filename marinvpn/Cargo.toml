@@ -32,6 +32,8 @@ rsa = { version = "0.9", features = ["sha2"] }
 ml-kem = "0.2"
 num-integer = "0.1"
 num-bigint-dig = "0.8"
+ring = "0.17"
+rfd = "0.14"
 [features]
 default = ["desktop"]
 web = ["dioxus/web"]
@@ -43,8 +45,8 @@ server = ["dioxus/server"]
 serial_test = "3.3.1"
 
 [profile.release]
-opt-level = "z"     # Optimize for size
-lto = true          # Link Time Optimization
-codegen-units = 1   # Better optimization
-panic = "abort"     # Reduce binary size
-strip = true        # Strip symbols automatically
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -116,6 +116,7 @@ pub fn Account() -> Element {
                     onclick: move |_| {
                         state.account_number.set(None);
                         state.auth_token.set(None);
+                        state.refresh_token.set(None);
                         state.account_expiry.set(None);
                         nav.replace(Route::Dashboard {});
                     },

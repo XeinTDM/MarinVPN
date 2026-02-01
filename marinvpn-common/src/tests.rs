@@ -21,14 +21,16 @@ mod tests {
             use validator::Validate;
 
             let req = LoginRequest {
-                account_number: "1234".to_string(),
-                device_name: None,
+                account_number: "ABCD".to_string(),
+                device_pubkey: None,
+                kick_device: None,
             };
             assert!(req.validate().is_err());
 
             let req = LoginRequest {
-                account_number: "1234 5678 1234 5678".to_string(),
-                device_name: Some("My Device".to_string()),
+                account_number: "ABCD E2GH JK7M NPQR".to_string(),
+                device_pubkey: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+                kick_device: None,
             };
             assert!(req.validate().is_ok());
         }

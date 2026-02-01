@@ -26,7 +26,7 @@ pub struct DnsBlockingState {
 #[cfg_attr(feature = "db", derive(FromRow))]
 pub struct Device {
     pub name: String,
-    pub added_at: i64,
+    pub created_date: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
@@ -57,7 +57,10 @@ pub struct AnonymousConfigRequest {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "validation", derive(Validate))]
 pub struct ConfigRequest {
-    #[cfg_attr(feature = "validation", validate(length(min = 16, max = 19)))]
+    #[cfg_attr(
+        feature = "validation",
+        validate(custom(function = "validate_account_number"))
+    )]
     pub account_number: String,
     #[cfg_attr(feature = "validation", validate(length(min = 1, max = 100)))]
     pub location: String,
@@ -100,10 +103,15 @@ pub struct VpnServer {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "validation", derive(Validate))]
 pub struct LoginRequest {
-    #[cfg_attr(feature = "validation", validate(length(min = 16, max = 19)))]
+    #[cfg_attr(
+        feature = "validation",
+        validate(custom(function = "validate_account_number"))
+    )]
     pub account_number: String,
+    #[cfg_attr(feature = "validation", validate(length(min = 40, max = 80)))]
+    pub device_pubkey: Option<String>,
     #[cfg_attr(feature = "validation", validate(length(min = 1, max = 50)))]
-    pub device_name: Option<String>,
+    pub kick_device: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -111,8 +119,11 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub success: bool,
     pub auth_token: Option<String>,
+    pub refresh_token: Option<String>,
     pub account_info: Option<Account>,
     pub current_device: Option<String>,
+    pub devices: Option<Vec<Device>>,
+    pub error_code: Option<String>,
     pub error: Option<String>,
 }
 
@@ -122,11 +133,29 @@ pub struct GenerateResponse {
     pub account_number: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "validation", derive(Validate))]
+pub struct RefreshRequest {
+    #[cfg_attr(feature = "validation", validate(length(min = 1, max = 4096)))]
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
+pub struct RefreshResponse {
+    pub auth_token: String,
+    pub refresh_token: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "validation", derive(Validate))]
 pub struct RemoveDeviceRequest {
-    #[cfg_attr(feature = "validation", validate(length(min = 16, max = 19)))]
+    #[cfg_attr(
+        feature = "validation",
+        validate(custom(function = "validate_account_number"))
+    )]
     pub account_number: String,
     #[cfg_attr(feature = "validation", validate(length(min = 1, max = 50)))]
     pub device_name: String,
@@ -136,7 +165,10 @@ pub struct RemoveDeviceRequest {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[cfg_attr(feature = "validation", derive(Validate))]
 pub struct ReportRequest {
-    #[cfg_attr(feature = "validation", validate(length(min = 16, max = 19)))]
+    #[cfg_attr(
+        feature = "validation",
+        validate(custom(function = "validate_account_number"))
+    )]
     pub account_number: String,
     #[cfg_attr(feature = "validation", validate(length(min = 1, max = 2000)))]
     pub message: String,
@@ -191,3 +223,34 @@ pub enum IpVersion {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "validation")]
+fn validate_account_number(value: &str) -> Result<(), validator::ValidationError> {
+    const ALLOWED: &str = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let cleaned: String = value
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_uppercase();
+    if cleaned.len() != 16 {
+        return Err(validator::ValidationError::new("account_length"));
+    }
+    if !cleaned.chars().all(|c| ALLOWED.contains(c)) {
+        return Err(validator::ValidationError::new("account_charset"));
+    }
+
+    if value.chars().any(|c| c.is_whitespace() && c != ' ') {
+        return Err(validator::ValidationError::new("account_grouping"));
+    }
+
+    if value.contains(' ') {
+        let parts: Vec<&str> = value.split(' ').collect();
+        if parts.len() != 4 || parts.iter().any(|p| p.len() != 4) {
+            return Err(validator::ValidationError::new("account_grouping"));
+        }
+    } else if value.len() != 16 {
+        return Err(validator::ValidationError::new("account_grouping"));
+    }
+
+    Ok(())
+}

@@ -11,7 +11,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 utoipa = { version = "5.0", features = ["chrono"], optional = true }
 validator = { version = "0.19", features = ["derive"], optional = true }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "macros", "chrono"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["macros", "chrono"], optional = true }
 
 [features]
 default = []

@@ -38,7 +38,44 @@ jobs:
       run: cargo clippy -- -D warnings
 
     - name: Run Tests
-      # Note: Keyring tests might fail in headless CI without specific setup. 
-      # We skip them if strictly headless, but windows-latest usually has some capability.
-      # If it fails, we might need to mock keyring.
       run: cargo test --verbose
+
+  server-tests:
+    name: Server Tests (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: marinvpn
+          POSTGRES_USER: marinvpn
+          POSTGRES_PASSWORD: marinvpn
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U marinvpn -d marinvpn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+
+    - name: Cache Cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Run Server Tests
+      env:
+        TEST_DATABASE_URL: postgres://marinvpn:marinvpn@127.0.0.1:5432/marinvpn
+      run: cargo test -p marinvpn-server --verbose

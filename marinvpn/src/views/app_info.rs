@@ -5,14 +5,22 @@ use dioxus::prelude::*;
 pub fn AppInfo() -> Element {
     let mut beta_joined = use_signal(|| false);
     let i18n = crate::hooks::use_i18n();
+    let state = use_context::<crate::state::ConnectionState>();
+    let branding = state.settings.read();
+    let branding_name = branding.branding_name.clone();
+    let branding_logo = branding.branding_logo_path.clone();
 
     rsx! {
         div { class: "h-full p-4 overflow-y-auto bg-background text-foreground custom-scrollbar",
             div { class: "flex flex-col items-center mb-8",
-                div { class: "w-16 h-16 bg-primary rounded-[2rem] flex items-center justify-center text-primary-foreground shadow-2xl shadow-primary/20 mb-4 rotate-3",
-                    ShieldCheck { size: 32, stroke_width: 2 }
+                div { class: "w-16 h-16 bg-primary rounded-[2rem] flex items-center justify-center text-primary-foreground shadow-2xl shadow-primary/20 mb-4 rotate-3 overflow-hidden",
+                    if branding_logo.is_empty() {
+                        ShieldCheck { size: 32, stroke_width: 2 }
+                    } else {
+                        img { src: "{branding_logo}", class: "h-10 w-10 object-contain" }
+                    }
                 }
-                h3 { class: "text-2xl font-bold text-foreground", "MarinVPN" }
+                h3 { class: "text-2xl font-bold text-foreground", "{branding_name}" }
                 p { class: "text-muted-foreground text-xs font-bold uppercase tracking-widest mt-1", "Version 0.1.5" }
             }
 

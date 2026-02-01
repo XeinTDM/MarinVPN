@@ -7,30 +7,40 @@ use marinvpn_server::{api_routes, AppState};
 use std::sync::Arc;
 use tower::util::ServiceExt;
 
-async fn setup_app() -> axum::Router {
-    let db_url = "sqlite::memory:";
-    let db = marinvpn_server::services::db::Database::new(db_url)
+async fn setup_app() -> Option<axum::Router> {
+    let db_url = match std::env::var("TEST_DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!("TEST_DATABASE_URL not set; skipping integration test.");
+            return None;
+        }
+    };
+    let db = marinvpn_server::services::db::Database::new(&db_url, "test_salt")
         .await
-        .expect("Failed to create memory DB");
+        .expect("Failed to create test DB");
 
     let mut settings = marinvpn_server::config::Settings::new().unwrap();
     settings.database.url = db_url.to_string();
 
     let vpn = marinvpn_server::services::vpn::VpnOrchestrator::new("wg0".to_string());
     let signer = marinvpn_server::services::auth::BlindSigner::new();
+    let support_key = marinvpn_server::services::auth::SupportKey::new();
     let state = Arc::new(AppState {
         db,
         settings,
         vpn,
         signer,
+        support_key,
     });
 
-    api_routes().with_state(state)
+    Some(api_routes().with_state(state))
 }
 
 #[tokio::test]
 async fn test_generate_and_login() {
-    let app = setup_app().await;
+    let Some(app) = setup_app().await else {
+        return;
+    };
 
     let response = app
         .clone()
@@ -54,7 +64,8 @@ async fn test_generate_and_login() {
 
     let login_req = LoginRequest {
         account_number: gen_res.account_number.clone(),
-        device_name: Some("Test Device".to_string()),
+        device_pubkey: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+        kick_device: None,
     };
 
     let response = app
@@ -80,5 +91,7 @@ async fn test_generate_and_login() {
         login_res.account_info.unwrap().account_number,
         gen_res.account_number
     );
-    assert_eq!(login_res.current_device, Some("Test Device".to_string()));
+    assert!(login_res.current_device.unwrap_or_default().len() > 0);
+    assert!(login_res.auth_token.unwrap_or_default().len() > 10);
+    assert!(login_res.refresh_token.unwrap_or_default().len() > 10);
 }

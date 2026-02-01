@@ -10,9 +10,9 @@ Account numbers are completely decoupled from VPN sessions using a Blind Signatu
 2. **Redemption:** The client unblinds the token and presents it to the server when requesting a VPN configuration.
 3. **Unlinkability:** The server verifies its signature but cannot link the redeemed token back to the account that requested it.
 
-### Ephemeral Peer Management & Lifecycle
-- **RAM-only Storage:** Peer public keys and assigned internal IPs are stored in an in-memory SQLite database (`ephemeral_pool`). They are wiped automatically on server restart.
-- **Session Lifecycle:** A background task purges stale VPN sessions and blinded tokens from RAM every 24 hours, ensuring a high degree of forward anonymity.
+### Peer Management & Lifecycle
+- **Shared Session Store:** Peer public keys, assigned internal IPs, used blind tokens, and attestation nonces are stored in the primary database so replay protection survives restarts and multi-instance deployments.
+- **Session Lifecycle:** A background task purges stale VPN sessions, tokens, and nonces every 24 hours to keep retention minimal.
 - **Unlinkability:** The database maintains no relationship between `account_number` and `peer_pub_key`.
 
 ### Daita (Defense Against AI-guided Traffic Analysis)
@@ -22,8 +22,16 @@ Account numbers are completely decoupled from VPN sessions using a Blind Signatu
 ## 2. Security
 
 ### Dynamic Client Attestation
-- **HMAC-SHA256 Challenge:** To prevent API scraping and unauthorized access, every request is signed with a dynamic, timestamped HMAC-SHA256 keyed-hash.
-- **Replay Protection:** The server enforces a strict 60-second validity window for attestation signatures, rendering intercepted headers useless.
+- **Ed25519 Request Signing:** Each request is signed with a device attestation key and verified server-side.
+- **Replay Protection:** The server enforces a strict 60-second validity window and one-time nonce usage.
+
+### Admin Endpoint Guarding
+- **Admin Token Enforcement:** Metrics and API docs require an admin token via `X-Admin-Token` or `Authorization: Bearer`.
+- **Proxy-Aware Allowlisting:** When deployed behind a trusted proxy, client IPs are checked against CIDR allowlists to prevent spoofed `X-Forwarded-For` headers.
+
+### Token Lifecycle
+- **Short-Lived Access Tokens:** Access tokens expire quickly to reduce blast radius.
+- **Refresh Tokens:** Long-lived refresh tokens are rotated on use and stored hashed per device in the database.
 
 ### Fail-Closed Kill Switch & Leak Protection
 - **Windows Lockdown:** Implements a strict "Fail-Closed" policy using the Windows Filtering Platform (WFP). All outbound traffic is blocked by default, with an explicit whitelist only for the VPN endpoint and tunnel interfaces.

@@ -11,6 +11,9 @@ pub fn MainLayout() -> Element {
     let state = use_context::<ConnectionState>();
     let nav = use_navigator();
     let i18n = crate::hooks::use_i18n();
+    let branding = state.settings.read();
+    let branding_name = branding.branding_name.clone();
+    let branding_logo = branding.branding_logo_path.clone();
 
     use_effect(move || {
         if (state.account_number)().is_none() {
@@ -57,11 +60,18 @@ pub fn MainLayout() -> Element {
                         Link {
                             to: Route::Dashboard {},
                             class: "flex items-center gap-2 hover:opacity-80 transition-opacity no-drag",
-                            img {
-                                src: asset!("/assets/logo.png"),
-                                class: "h-6 w-auto",
+                            if branding_logo.is_empty() {
+                                img {
+                                    src: asset!("/assets/logo.png"),
+                                    class: "h-6 w-auto",
+                                }
+                            } else {
+                                img {
+                                    src: "{branding_logo}",
+                                    class: "h-6 w-auto",
+                                }
                             }
-                            span { class: "font-bold text-lg tracking-tight", "MarinVPN" }
+                            span { class: "font-bold text-lg tracking-tight", "{branding_name}" }
                         }
 
                         div { class: "flex-1 h-8 drag-region" }

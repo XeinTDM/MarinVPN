@@ -1,0 +1,15 @@
+{
+    email admin@example.com
+}
+
+vpn.example.com {
+    encode zstd gzip
+
+    reverse_proxy 127.0.0.1:3000
+
+    @metrics path /metrics
+    respond @metrics 403
+
+    @docs path /swagger-ui* /api-docs*
+    respond @docs 403
+}

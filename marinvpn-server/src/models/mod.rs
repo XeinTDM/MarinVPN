@@ -5,7 +5,8 @@ use utoipa::ToSchema;
 pub use marinvpn_common::{
     Account, AnonymousConfigRequest, BlindTokenRequest, BlindTokenResponse, ConfigRequest,
     Device as CommonDevice, ErrorResponse, GenerateResponse, LoginRequest as CommonLoginRequest,
-    LoginResponse as CommonLoginResponse, RemoveDeviceRequest, ReportRequest,
+    LoginResponse as CommonLoginResponse, RefreshRequest as CommonRefreshRequest,
+    RefreshResponse as CommonRefreshResponse, RemoveDeviceRequest, ReportRequest,
     VpnServer as CommonVpnServer, WireGuardConfig,
 };
 
@@ -15,13 +16,17 @@ pub struct Device {
     pub account_id: String,
     pub name: String,
     pub added_at: i64,
+    pub attestation_pubkey: Option<String>,
 }
 
 impl Device {
     pub fn into_common(self) -> CommonDevice {
         CommonDevice {
             name: self.name,
-            added_at: self.added_at,
+            created_date: chrono::DateTime::from_timestamp(self.added_at, 0)
+                .unwrap_or_else(|| chrono::Utc::now())
+                .format("%Y-%m-%d")
+                .to_string(),
         }
     }
 }
@@ -57,11 +62,13 @@ impl VpnServer {
 
 pub mod requests {
     pub use marinvpn_common::{
-        AnonymousConfigRequest, BlindTokenRequest, ConfigRequest, LoginRequest,
+        AnonymousConfigRequest, BlindTokenRequest, ConfigRequest, LoginRequest, RefreshRequest,
         RemoveDeviceRequest, ReportRequest,
     };
 }
 
 pub mod responses {
-    pub use marinvpn_common::{BlindTokenResponse, ErrorResponse, GenerateResponse, LoginResponse};
+    pub use marinvpn_common::{
+        BlindTokenResponse, ErrorResponse, GenerateResponse, LoginResponse, RefreshResponse,
+    };
 }
