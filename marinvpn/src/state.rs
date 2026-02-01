@@ -351,7 +351,11 @@ pub fn AppStateProvider(children: Element) -> Element {
     use_effect(move || {
         let s = settings();
         let account = account_number();
-        if !account.is_empty() && !auto_connect_started() && s.auto_connect {
+        let has_account = account
+            .as_ref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
+        if has_account && !auto_connect_started() && s.auto_connect {
             auto_connect_started.set(true);
             if s.multi_hop {
                 let entry = if s.entry_location.is_empty() {

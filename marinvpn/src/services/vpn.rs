@@ -97,6 +97,42 @@ trait WgRunner: Send + Sync {
     async fn disable_kill_switch(&self);
 }
 
+const DEFAULT_WIREGUARD_PORT: u16 = 51820;
+
+fn parse_endpoint_host_port(endpoint: &str) -> (String, u16) {
+    let trimmed = endpoint.trim();
+    if trimmed.starts_with('[') {
+        if let Some(end_bracket) = trimmed.find(']') {
+            let host = trimmed[1..end_bracket].to_string();
+            let port = trimmed[end_bracket + 1..]
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(DEFAULT_WIREGUARD_PORT);
+            return (host, port);
+        }
+    }
+
+    if let Some(colon_idx) = trimmed.rfind(':') {
+        let host_part = &trimmed[..colon_idx];
+        let port_part = trimmed[colon_idx + 1..].trim();
+        if !port_part.is_empty()
+            && port_part.chars().all(|c| c.is_ascii_digit())
+            && !host_part.is_empty()
+        {
+            if host_part.contains(':') {
+                if host_part.parse::<std::net::Ipv6Addr>().is_ok() {
+                    let port = port_part.parse::<u16>().unwrap_or(DEFAULT_WIREGUARD_PORT);
+                    return (host_part.to_string(), port);
+                }
+            } else if let Ok(port) = port_part.parse::<u16>() {
+                return (host_part.to_string(), port);
+            }
+        }
+    }
+
+    (trimmed.to_string(), DEFAULT_WIREGUARD_PORT)
+}
+
 #[derive(Clone)]
 struct ConnectionContext {
     entry_name: String,
@@ -1472,43 +1508,6 @@ impl RealWgRunner {
 
 #[async_trait::async_trait]
 impl WgRunner for RealWgRunner {
-    const DEFAULT_WIREGUARD_PORT: u16 = 51820;
-
-    fn parse_endpoint_host_port(endpoint: &str) -> (String, u16) {
-        let trimmed = endpoint.trim();
-        if trimmed.starts_with('[') {
-            if let Some(end_bracket) = trimmed.find(']') {
-                let host = trimmed[1..end_bracket].to_string();
-                let port = trimmed[end_bracket + 1..]
-                    .strip_prefix(':')
-                    .and_then(|p| p.parse::<u16>().ok())
-                    .unwrap_or(Self::DEFAULT_WIREGUARD_PORT);
-                return (host, port);
-            }
-        }
-
-        if let Some(colon_idx) = trimmed.rfind(':') {
-            let host_part = &trimmed[..colon_idx];
-            let port_part = &trimmed[colon_idx + 1..];
-            if !port_part.is_empty() && port_part.chars().all(|c| c.is_ascii_digit()) {
-                if !host_part.is_empty() {
-                    if host_part.contains(':') {
-                        if host_part.parse::<std::net::Ipv6Addr>().is_ok() {
-                            let port = port_part
-                                .parse::<u16>()
-                                .unwrap_or(Self::DEFAULT_WIREGUARD_PORT);
-                            return (host_part.to_string(), port);
-                        }
-                    } else if let Ok(port) = port_part.parse::<u16>() {
-                        return (host_part.to_string(), port);
-                    }
-                }
-            }
-        }
-
-        (trimmed.to_string(), Self::DEFAULT_WIREGUARD_PORT)
-    }
-
     async fn up(
         &self,
         entry: &WireGuardConfig,
@@ -1861,18 +1860,19 @@ impl WgRunner for RealWgRunner {
         endpoint: &str,
         settings: &SettingsState,
     ) -> Result<(), VpnError> {
-        let (host, port) = Self::parse_endpoint_host_port(endpoint);
-        let (resolved_v4, resolved_v6) = if host == "0.0.0.0" {
+        let (host, port) = parse_endpoint_host_port(endpoint);
+        let host_str = host.as_str();
+        let (resolved_v4, resolved_v6) = if host_str == "0.0.0.0" {
             (Vec::new(), Vec::new())
         } else {
             Self::resolve_endpoint_ips(&host).await
         };
-        if host != "0.0.0.0" && resolved_v4.is_empty() && resolved_v6.is_empty() {
+        if host_str != "0.0.0.0" && resolved_v4.is_empty() && resolved_v6.is_empty() {
             return Err(VpnError::FirewallError(
                 "Failed to resolve endpoint for kill-switch".to_string(),
             ));
         }
-        let v4_addrs: Vec<&str> = if host == "0.0.0.0" {
+        let v4_addrs: Vec<&str> = if host_str == "0.0.0.0" {
             vec!["0.0.0.0"]
         } else {
             resolved_v4.iter().map(|s| s.as_str()).collect()

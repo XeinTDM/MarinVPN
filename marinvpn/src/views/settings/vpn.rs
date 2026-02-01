@@ -8,7 +8,20 @@ use dioxus::prelude::*;
 pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
     let mut state = use_context::<ConnectionState>();
     let nav = use_navigator();
-    let s = state.settings.read();
+    let settings_guard = state.settings.read();
+    let launch_on_startup = settings_guard.launch_on_startup;
+    let auto_connect = settings_guard.auto_connect;
+    let local_sharing = settings_guard.local_sharing;
+    let dns_blocking = settings_guard.dns_blocking.clone();
+    let custom_dns = settings_guard.custom_dns;
+    let custom_dns_server = settings_guard.custom_dns_server.clone();
+    let ipv6_support = settings_guard.ipv6_support;
+    let lockdown_mode = settings_guard.lockdown_mode;
+    let stealth_mode = settings_guard.stealth_mode;
+    let quantum_resistant = settings_guard.quantum_resistant;
+    let ip_version = settings_guard.ip_version;
+    let mtu_value = settings_guard.mtu;
+    drop(settings_guard);
     let i18n = crate::hooks::use_i18n();
     let mut show_local_sharing_info = use_signal(|| false);
     let mut show_dns_info = use_signal(|| false);
@@ -166,18 +179,18 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
             }
 
             // Launch app on start-up
-            SettingRow {
-                label: i18n.tr("launch_startup").to_string(),
-                checked: s.launch_on_startup,
-                onclick: move |_| {
-                    state.settings.with_mut(|s| s.launch_on_startup = !s.launch_on_startup);
-                },
-            }
+                SettingRow {
+                    label: i18n.tr("launch_startup").to_string(),
+                    checked: launch_on_startup,
+                    onclick: move |_| {
+                        state.settings.with_mut(|s| s.launch_on_startup = !s.launch_on_startup);
+                    },
+                }
             // Auto-connect
             div { class: "flex flex-col",
                 SettingRow {
                     label: i18n.tr("auto_connect").to_string(),
-                    checked: s.auto_connect,
+                    checked: auto_connect,
                     onclick: move |_| {
                         state.settings.with_mut(|s| s.auto_connect = !s.auto_connect);
                     },
@@ -193,7 +206,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                     label: i18n.tr("local_sharing").to_string(),
                     show_info: true,
                     oninfo: move |_| show_local_sharing_info.set(true),
-                    checked: s.local_sharing,
+                    checked: local_sharing,
                     onclick: move |_| {
                         state.settings.with_mut(|s| s.local_sharing = !s.local_sharing);
                     },
@@ -216,35 +229,35 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                     div { class: "bg-accent/5 divide-y divide-border/20",
                         SettingRow {
                             label: i18n.tr("ads").to_string(),
-                            checked: s.dns_blocking.ads,
+                            checked: dns_blocking.ads,
                             onclick: move |_| {
                                 state.settings.with_mut(|s| s.dns_blocking.ads = !s.dns_blocking.ads);
                             },
                         }
                         SettingRow {
                             label: i18n.tr("trackers").to_string(),
-                            checked: s.dns_blocking.trackers,
+                            checked: dns_blocking.trackers,
                             onclick: move |_| {
                                 state.settings.with_mut(|s| s.dns_blocking.trackers = !s.dns_blocking.trackers);
                             },
                         }
                         SettingRow {
                             label: i18n.tr("malware").to_string(),
-                            checked: s.dns_blocking.malware,
+                            checked: dns_blocking.malware,
                             onclick: move |_| {
                                 state.settings.with_mut(|s| s.dns_blocking.malware = !s.dns_blocking.malware);
                             },
                         }
                         SettingRow {
                             label: i18n.tr("gambling").to_string(),
-                            checked: s.dns_blocking.gambling,
+                            checked: dns_blocking.gambling,
                             onclick: move |_| {
                                 state.settings.with_mut(|s| s.dns_blocking.gambling = !s.dns_blocking.gambling);
                             },
                         }
                         SettingRow {
                             label: i18n.tr("adult_content").to_string(),
-                            checked: s.dns_blocking.adult_content,
+                            checked: dns_blocking.adult_content,
                             onclick: move |_| {
                                 state
                                     .settings
@@ -253,7 +266,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                         }
                         SettingRow {
                             label: i18n.tr("social_media").to_string(),
-                            checked: s.dns_blocking.social_media,
+                            checked: dns_blocking.social_media,
                             onclick: move |_| {
                                 state
                                     .settings
@@ -265,16 +278,16 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
 
                 SettingRow {
                     label: "Use custom DNS server".to_string(),
-                    checked: s.custom_dns,
+                    checked: custom_dns,
                     onclick: move |_| {
                         state.settings.with_mut(|s| s.custom_dns = !s.custom_dns);
                     },
                 }
-                if s.custom_dns {
+                if custom_dns {
                     div { class: "px-4 py-2",
                         input {
                             class: "w-full bg-accent/20 border border-border rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all",
-                            value: "{s.custom_dns_server}",
+                            value: "{custom_dns_server}",
                             placeholder: "e.g. 1.1.1.1",
                             oninput: move |e| {
                                 let val = e.value();
@@ -294,7 +307,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                     label: i18n.tr("ipv6_support").to_string(),
                     show_info: true,
                     oninfo: move |_| show_ipv6_info.set(true),
-                    checked: s.ipv6_support,
+                    checked: ipv6_support,
                     onclick: move |_| {
                         state.settings.with_mut(|s| s.ipv6_support = !s.ipv6_support);
                     },
@@ -310,9 +323,10 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                     label: i18n.tr("lockdown_mode").to_string(),
                     show_info: true,
                     oninfo: move |_| show_lockdown_info.set(true),
-                    checked: s.lockdown_mode,
+                    checked: lockdown_mode,
                     onclick: move |_| {
-                        if s.lockdown_mode {
+                        let lockdown_enabled = state.settings.read().lockdown_mode;
+                        if lockdown_enabled {
                             state.settings.with_mut(|s| s.lockdown_mode = false);
                         } else {
                             show_lockdown_confirm.set(true);
@@ -330,7 +344,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                 SettingAction {
                     label: i18n.tr("anti_censorship").to_string(),
                     value: Some(
-                        match s.stealth_mode {
+                        match stealth_mode {
                             crate::models::StealthMode::Automatic => "Automatic".to_string(),
                             crate::models::StealthMode::WireGuardPort => "Port 53".to_string(),
                             crate::models::StealthMode::Lwo => "LWO".to_string(),
@@ -358,7 +372,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                     label: i18n.tr("quantum_resistant").to_string(),
                     show_info: true,
                     oninfo: move |_| show_quantum_info.set(true),
-                    checked: s.quantum_resistant,
+                    checked: quantum_resistant,
                     onclick: move |_| {
                         state.settings.with_mut(|s| s.quantum_resistant = !s.quantum_resistant);
                     },
@@ -375,21 +389,21 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
                 }
                 SettingSelectRow {
                     label: i18n.tr("automatic").to_string(),
-                    selected: s.ip_version == IpVersion::Automatic,
+                    selected: ip_version == IpVersion::Automatic,
                     onclick: move |_| {
                         state.settings.with_mut(|s| s.ip_version = IpVersion::Automatic);
                     },
                 }
                 SettingSelectRow {
                     label: "IPv4".to_string(),
-                    selected: s.ip_version == IpVersion::Ipv4,
+                    selected: ip_version == IpVersion::Ipv4,
                     onclick: move |_| {
                         state.settings.with_mut(|s| s.ip_version = IpVersion::Ipv4);
                     },
                 }
                 SettingSelectRow {
                     label: "IPv6".to_string(),
-                    selected: s.ip_version == IpVersion::Ipv6,
+                    selected: ip_version == IpVersion::Ipv6,
                     onclick: move |_| {
                         state.settings.with_mut(|s| s.ip_version = IpVersion::Ipv6);
                     },
@@ -401,7 +415,7 @@ pub fn VpnSettings(dns_expanded: Signal<bool>) -> Element {
             div { class: "flex flex-col",
                 SettingInput {
                     label: i18n.tr("mtu").to_string(),
-                    value: s.mtu.to_string(),
+                    value: mtu_value.to_string(),
                     oninput: move |e: Event<FormData>| {
                         if let Ok(val) = e.value().parse::<u32>() {
                             state.settings.with_mut(|s| s.mtu = val);

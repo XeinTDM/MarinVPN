@@ -10,7 +10,7 @@ use rsa::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -168,13 +168,13 @@ fn resolve_key_path(filename: &str) -> PathBuf {
         .join(filename)
 }
 
-fn ensure_key_dir(path: &PathBuf) {
+fn ensure_key_dir(path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
 }
 
-fn write_private_key(path: &PathBuf, data: &[u8]) -> std::io::Result<()> {
+fn write_private_key(path: &Path, data: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

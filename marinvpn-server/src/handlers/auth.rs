@@ -212,66 +212,15 @@ pub async fn login(
 
     let device_name = if let Some(existing) = existing_device {
         existing.name
-    } else {
-        if let Some(pubkey) = payload.device_pubkey.as_deref() {
-            if devices.len() >= 5 {
-                if let Some(legacy) = devices.iter().find(|d| d.attestation_pubkey.is_none()) {
-                    let updated = state
-                        .db
-                        .update_device_pubkey(&account.account_number, &legacy.name, pubkey)
-                        .await?;
-                    if updated {
-                        legacy.name.clone()
-                    } else {
-                        let common_devices = devices
-                            .into_iter()
-                            .map(|d| marinvpn_common::Device {
-                                name: d.name,
-                                created_date: format_utc_date(d.added_at),
-                            })
-                            .collect();
-                        return Ok(Json(LoginResponse {
-                            success: false,
-                            auth_token: None,
-                            refresh_token: None,
-                            account_info: None,
-                            current_device: None,
-                            devices: Some(common_devices),
-                            error_code: Some("DEVICE_UPDATE_FAILED".to_string()),
-                            error: Some("Failed to update device key".to_string()),
-                        }));
-                    }
-                } else if let Some(ref kick) = payload.kick_device {
-                    let removed = state
-                        .db
-                        .remove_device(&account.account_number, kick)
-                        .await?;
-                    if !removed {
-                        let common_devices = devices
-                            .into_iter()
-                            .map(|d| marinvpn_common::Device {
-                                name: d.name,
-                                created_date: format_utc_date(d.added_at),
-                            })
-                            .collect();
-                        return Ok(Json(LoginResponse {
-                            success: false,
-                            auth_token: None,
-                            refresh_token: None,
-                            account_info: None,
-                            current_device: None,
-                            devices: Some(common_devices),
-                            error_code: Some("DEVICE_NOT_FOUND".to_string()),
-                            error: Some("Device not found".to_string()),
-                        }));
-                    }
-
-                    let name = generate_device_name();
-                    state
-                        .db
-                        .add_device(&account.account_number, &name, Some(pubkey))
-                        .await?;
-                    name
+    } else if let Some(pubkey) = payload.device_pubkey.as_deref() {
+        if devices.len() >= 5 {
+            if let Some(legacy) = devices.iter().find(|d| d.attestation_pubkey.is_none()) {
+                let updated = state
+                    .db
+                    .update_device_pubkey(&account.account_number, &legacy.name, pubkey)
+                    .await?;
+                if updated {
+                    legacy.name.clone()
                 } else {
                     let common_devices = devices
                         .into_iter()
@@ -287,29 +236,77 @@ pub async fn login(
                         account_info: None,
                         current_device: None,
                         devices: Some(common_devices),
-                        error_code: Some("DEVICE_LIMIT".to_string()),
-                        error: Some(
-                            "Device limit reached (max 5). Remove a device to continue."
-                                .to_string(),
-                        ),
+                        error_code: Some("DEVICE_UPDATE_FAILED".to_string()),
+                        error: Some("Failed to update device key".to_string()),
                     }));
                 }
-            } else {
+            } else if let Some(ref kick) = payload.kick_device {
+                let removed = state
+                    .db
+                    .remove_device(&account.account_number, kick)
+                    .await?;
+                if !removed {
+                    let common_devices = devices
+                        .into_iter()
+                        .map(|d| marinvpn_common::Device {
+                            name: d.name,
+                            created_date: format_utc_date(d.added_at),
+                        })
+                        .collect();
+                    return Ok(Json(LoginResponse {
+                        success: false,
+                        auth_token: None,
+                        refresh_token: None,
+                        account_info: None,
+                        current_device: None,
+                        devices: Some(common_devices),
+                        error_code: Some("DEVICE_NOT_FOUND".to_string()),
+                        error: Some("Device not found".to_string()),
+                    }));
+                }
+
                 let name = generate_device_name();
                 state
                     .db
                     .add_device(&account.account_number, &name, Some(pubkey))
                     .await?;
                 name
+            } else {
+                let common_devices = devices
+                    .into_iter()
+                    .map(|d| marinvpn_common::Device {
+                        name: d.name,
+                        created_date: format_utc_date(d.added_at),
+                    })
+                    .collect();
+                return Ok(Json(LoginResponse {
+                    success: false,
+                    auth_token: None,
+                    refresh_token: None,
+                    account_info: None,
+                    current_device: None,
+                    devices: Some(common_devices),
+                    error_code: Some("DEVICE_LIMIT".to_string()),
+                    error: Some(
+                        "Device limit reached (max 5). Remove a device to continue.".to_string(),
+                    ),
+                }));
             }
         } else {
             let name = generate_device_name();
             state
                 .db
-                .add_device(&account.account_number, &name, None)
+                .add_device(&account.account_number, &name, Some(pubkey))
                 .await?;
             name
         }
+    } else {
+        let name = generate_device_name();
+        state
+            .db
+            .add_device(&account.account_number, &name, None)
+            .await?;
+        name
     };
 
     let token = crate::services::auth::create_token(
@@ -485,7 +482,7 @@ pub async fn get_devices(
 
 fn format_utc_date(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0)
-        .unwrap_or_else(|| chrono::Utc::now())
+        .unwrap_or_else(chrono::Utc::now)
         .format("%Y-%m-%d")
         .to_string()
 }

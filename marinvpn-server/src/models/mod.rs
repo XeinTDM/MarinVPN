@@ -24,7 +24,7 @@ impl Device {
         CommonDevice {
             name: self.name,
             created_date: chrono::DateTime::from_timestamp(self.added_at, 0)
-                .unwrap_or_else(|| chrono::Utc::now())
+                .unwrap_or_else(chrono::Utc::now)
                 .format("%Y-%m-%d")
                 .to_string(),
         }
