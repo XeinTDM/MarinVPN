@@ -25,7 +25,7 @@ pub fn Devices() -> Element {
         div { class: "h-full w-full flex flex-col bg-background",
             div { class: "flex-1 overflow-y-auto custom-scrollbar",
                 div { class: "space-y-3 pb-24",
-                    match (devices_resource.value())() {
+                    match &*devices_resource.value().read() {
                         Some(Ok(devices)) => rsx! {
                             for device in devices {
                                 {
@@ -72,7 +72,7 @@ pub fn Devices() -> Element {
                                                                         devices_resource.restart();
                                                                         toast.show(&format!("Removed {}", dev_name), ToastType::Success);
                                                                     }
-                                                                    Err(e) => toast.show(&format!("Error: {}", e), ToastType::Error),
+                                                                    Err(e) => toast.show(&e.user_friendly_message(), ToastType::Error),
                                                                 }
                                                             });
                                                         },
@@ -86,7 +86,7 @@ pub fn Devices() -> Element {
                             }
                         },
                         Some(Err(e)) => rsx! {
-                            div { class: "p-8 text-center text-destructive text-xs", "Failed to load devices: {e}" }
+                            div { class: "p-8 text-center text-destructive text-xs", "Failed to load devices: {e.user_friendly_message()}" }
                         },
                         None => rsx! {
                             div { class: "p-8 flex justify-center", RefreshCw { class: "animate-spin text-muted-foreground", size: 24 } }

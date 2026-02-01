@@ -48,7 +48,7 @@ pub fn Support() -> Element {
                                                     show_report_modal.set(false);
                                                     report_text.set(String::new());
                                                 }
-                                                Err(e) => toast.show(&format!("Error: {}", e), ToastType::Error),
+                                                Err(e) => toast.show(&e.user_friendly_message(), ToastType::Error),
                                             }
                                             is_submitting.set(false);
                                         });

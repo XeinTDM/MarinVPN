@@ -1,12 +1,12 @@
 use crate::models::{ConnectionStatus, SettingsState, StealthMode, WireGuardConfig};
 use base64::Engine;
 use rand::Rng;
-use std::fs;
 use std::net::{SocketAddr, TcpStream};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::fs;
+use tokio::process::Command;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info, warn};
 
@@ -229,7 +229,7 @@ impl WireGuardService {
                     if stats.latest_handshake > 0 {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
+                            .unwrap_or_default()
                             .as_secs();
                         if now.saturating_sub(stats.latest_handshake) > 180 {
                             warn!("Handshake stale. Triggering self-healing...");
@@ -269,6 +269,7 @@ impl WireGuardService {
             info!("DAITA: Using multi-modal traffic masking (Browsing, Streaming, VOIP mimics).");
 
             let fallback_targets = ["1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"];
+            let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.ok();
 
             loop {
                 let (is_connected, endpoint) = {
@@ -286,8 +287,6 @@ impl WireGuardService {
                     let mut rng = rand::thread_rng();
                     fallback_targets[rng.gen_range(0..fallback_targets.len())].to_string()
                 });
-
-                let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok();
 
                 let (burst_count, base_delay, packet_size_range, jitter_range, mode) = {
                     let mut rng = rand::thread_rng();
@@ -340,7 +339,7 @@ impl WireGuardService {
                     }
 
                     if let Some(ref s) = socket {
-                        let _ = s.send_to(&noise, &target);
+                        let _ = s.send_to(&noise, &target).await;
                     }
 
                     tokio::time::sleep(Duration::from_millis(jitter)).await;
@@ -753,7 +752,7 @@ trait Obfuscator: Send + Sync {
 }
 
 struct WsObfuscator {
-    child: Arc<Mutex<Option<std::process::Child>>>,
+    child: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
 impl WsObfuscator {
@@ -807,15 +806,15 @@ impl Obfuscator for WsObfuscator {
         let mut lock = self.child.lock().await;
         if let Some(mut child) = lock.take() {
             info!("Stopping WSTunnel...");
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
         }
         Ok(())
     }
 }
 
 struct SsObfuscator {
-    child: Arc<Mutex<Option<std::process::Child>>>,
+    child: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
 impl SsObfuscator {
@@ -877,15 +876,15 @@ impl Obfuscator for SsObfuscator {
         let mut lock = self.child.lock().await;
         if let Some(mut child) = lock.take() {
             info!("Stopping Shadowsocks...");
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
         }
         Ok(())
     }
 }
 
 struct QuicObfuscator {
-    child: Arc<Mutex<Option<std::process::Child>>>,
+    child: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
 impl QuicObfuscator {
@@ -934,15 +933,15 @@ impl Obfuscator for QuicObfuscator {
         let mut lock = self.child.lock().await;
         if let Some(mut child) = lock.take() {
             info!("Stopping QUIC tunnel...");
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
         }
         Ok(())
     }
 }
 
 struct TcpObfuscator {
-    child: Arc<Mutex<Option<std::process::Child>>>,
+    child: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
 impl TcpObfuscator {
@@ -1129,7 +1128,7 @@ struct RealWgRunner {
 
 impl RealWgRunner {
     fn new() -> Self {
-        let wg_present = Command::new("wg").arg("--version").output().is_ok();
+        let wg_present = std::process::Command::new("wg").arg("--version").output().is_ok();
         if !wg_present {
             warn!("'wg' tool not detected. VPN operations will likely fail.");
         }
@@ -1269,12 +1268,11 @@ impl RealWgRunner {
         {
             {
                 let mut state = self.state.lock().await;
-                if state.original_dns_snapshot.is_none() {
-                    state.original_dns_snapshot = Self::capture_dns_snapshot();
-                }
-            }
-
-            let first_dns = dns_servers.split(',').next().unwrap_or("1.1.1.1").trim();
+                                if state.original_dns_snapshot.is_none() {
+                                    state.original_dns_snapshot = Self::capture_dns_snapshot().await;
+                                }
+                            }
+                            let first_dns = dns_servers.split(',').next().unwrap_or("1.1.1.1").trim();
             info!(
                 "Applying Windows DNS: {} to interface {}",
                 first_dns, self.iface_entry
@@ -1356,10 +1354,11 @@ impl RealWgRunner {
     }
 
     #[cfg(target_os = "windows")]
-    fn read_firewall_policy() -> Option<String> {
+    async fn read_firewall_policy() -> Option<String> {
         let output = Command::new("netsh")
             .args(["advfirewall", "show", "allprofiles"])
             .output()
+            .await
             .ok()?;
         if !output.status.success() {
             return None;
@@ -1421,7 +1420,7 @@ impl RealWgRunner {
     }
 
     #[cfg(target_os = "windows")]
-    fn capture_dns_snapshot() -> Option<Vec<DnsSnapshot>> {
+    async fn capture_dns_snapshot() -> Option<Vec<DnsSnapshot>> {
         let output = Command::new("powershell")
             .args([
                 "-NoProfile",
@@ -1430,6 +1429,7 @@ impl RealWgRunner {
                  Select-Object -Property InterfaceAlias,AddressFamily,ServerAddresses | ConvertTo-Json -Compress",
             ])
             .output()
+            .await
             .ok()?;
         if !output.status.success() {
             return None;
@@ -1613,6 +1613,7 @@ impl WgRunner for RealWgRunner {
             .arg(&self.iface_entry)
             .args(["transfer", "latest-handshake"])
             .output()
+            .await
             .map_err(|_| VpnError::DriverMissing)?;
 
         if !output.status.success() {
@@ -1757,11 +1758,13 @@ impl WgRunner for RealWgRunner {
             let iface = Command::new("sh")
                 .args(["-c", get_iface])
                 .output()
+                .await
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_else(|_| "eth0".to_string());
             let _ = Command::new("ip")
                 .args(["route", "add", ip, "dev", &iface])
-                .status();
+                .status()
+                .await;
         }
 
         #[cfg(target_os = "windows")]
@@ -1776,7 +1779,8 @@ impl WgRunner for RealWgRunner {
                     "metric",
                     "1",
                 ])
-                .status();
+                .status()
+                .await;
         }
     }
 
@@ -1789,17 +1793,20 @@ impl WgRunner for RealWgRunner {
             let mut options = fs::OpenOptions::new();
             options.create(true).write(true).truncate(true).mode(0o600);
 
-            use std::io::Write;
+            use tokio::io::AsyncWriteExt;
             let mut file = options
                 .open(&conf_path)
+                .await
                 .map_err(|e| VpnError::InterfaceError(e.to_string()))?;
             file.write_all(conf.as_bytes())
+                .await
                 .map_err(|e| VpnError::InterfaceError(e.to_string()))?;
 
             let output = Command::new("wg-quick")
                 .arg("up")
                 .arg(&conf_path)
                 .output()
+                .await
                 .map_err(|_| VpnError::DriverMissing)?;
 
             if !output.status.success() {
@@ -1815,15 +1822,18 @@ impl WgRunner for RealWgRunner {
                     VpnError::InterfaceError("Failed to get project directory".to_string())
                 })?;
             let config_dir = proj_dirs.cache_dir().join("tunnels");
-            let _ = fs::create_dir_all(&config_dir);
+            let _ = fs::create_dir_all(&config_dir).await;
 
             let conf_path = config_dir.join(format!("{}.conf", iface));
-            fs::write(&conf_path, conf).map_err(|e| VpnError::InterfaceError(e.to_string()))?;
+            fs::write(&conf_path, conf)
+                .await
+                .map_err(|e| VpnError::InterfaceError(e.to_string()))?;
 
             let _ = Command::new("wireguard.exe")
                 .arg("/installmanagerservice")
                 .arg(&conf_path)
                 .status()
+                .await
                 .map_err(|_| VpnError::DriverMissing)?;
         }
         Ok(())
@@ -1836,8 +1846,9 @@ impl WgRunner for RealWgRunner {
             let _ = Command::new("wg-quick")
                 .arg("down")
                 .arg(&conf_path)
-                .output();
-            let _ = fs::remove_file(&conf_path);
+                .output()
+                .await;
+            let _ = fs::remove_file(&conf_path).await;
         }
 
         #[cfg(target_os = "windows")]
@@ -1845,7 +1856,8 @@ impl WgRunner for RealWgRunner {
             let _ = Command::new("wireguard.exe")
                 .arg("/uninstallmanagerservice")
                 .arg(iface)
-                .output();
+                .output()
+                .await;
 
             if let Some(proj_dirs) = directories::ProjectDirs::from("com", "marinvpn", "MarinVPN") {
                 let config_dir = proj_dirs.cache_dir().join("tunnels");
@@ -2111,10 +2123,10 @@ impl WgRunner for RealWgRunner {
             {
                 let mut state = self.state.lock().await;
                 if state.original_firewall_policy.is_none() {
-                    state.original_firewall_policy = Self::read_firewall_policy();
+                    state.original_firewall_policy = Self::read_firewall_policy().await;
                 }
                 if state.original_dns_snapshot.is_none() {
-                    state.original_dns_snapshot = Self::capture_dns_snapshot();
+                    state.original_dns_snapshot = Self::capture_dns_snapshot().await;
                 }
             }
 

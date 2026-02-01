@@ -1,4 +1,4 @@
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::models::{Account, Device, VpnServer};
 use argon2::{
     password_hash::{PasswordHasher, SaltString},
@@ -6,6 +6,7 @@ use argon2::{
 };
 use blake2::{Blake2s, Digest};
 use chrono::{TimeZone, Utc};
+use rand::Rng;
 use sqlx::{postgres::PgPoolOptions, Error, PgPool};
 use tracing::info;
 
@@ -16,8 +17,9 @@ pub struct Database {
 }
 
 impl Database {
-    fn hash_account(&self, account_number: &str) -> String {
-        let salt = SaltString::encode_b64(self.salt.as_bytes()).unwrap();
+    fn hash_account_legacy(&self, account_number: &str) -> AppResult<String> {
+        let salt = SaltString::encode_b64(self.salt.as_bytes())
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Salt encoding failed: {}", e)))?;
 
         let normalized: String = account_number
             .chars()
@@ -25,15 +27,74 @@ impl Database {
             .collect::<String>()
             .to_uppercase();
 
-        let params = Params::new(15360, 2, 1, None).unwrap();
+        let params = Params::new(15360, 2, 1, None)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Argon2 params failed: {}", e)))?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
         let hash = argon2
             .hash_password(normalized.as_bytes(), &salt)
-            .expect("Failed to hash account number")
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Hashing failed: {}", e)))?
             .to_string();
 
-        hash
+        Ok(hash)
+    }
+
+    fn hash_account_v2(account_number: &str, salt: &str) -> AppResult<String> {
+        let salt_string = SaltString::from_b64(salt)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid salt: {}", e)))?;
+
+        let normalized: String = account_number
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_uppercase();
+
+        let params = Params::new(15360, 2, 1, None)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Argon2 params failed: {}", e)))?;
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+
+        let hash = argon2
+            .hash_password(normalized.as_bytes(), &salt_string)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Hashing failed: {}", e)))?
+            .to_string();
+
+        Ok(hash)
+    }
+
+    async fn resolve_account_pk(&self, account_number: &str) -> AppResult<String> {
+        let normalized: String = account_number
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_uppercase();
+
+        let prefix = if normalized.len() >= 8 {
+            &normalized[..8]
+        } else {
+            &normalized
+        };
+
+        let candidates: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT account_number, salt FROM accounts WHERE prefix = $1")
+                .bind(prefix)
+                .fetch_all(&self.pool)
+                .await?;
+
+        for (db_hash, db_salt) in candidates {
+            if let Some(salt) = db_salt {
+                let h = Self::hash_account_v2(account_number, &salt)?;
+                if h == db_hash {
+                    return Ok(h);
+                }
+            } else {
+                let h = self.hash_account_legacy(account_number)?;
+                if h == db_hash {
+                    return Ok(h);
+                }
+            }
+        }
+
+        self.hash_account_legacy(account_number)
     }
 
     pub async fn new(url: &str, salt: &str) -> AppResult<Self> {
@@ -155,11 +216,22 @@ impl Database {
         let now = Utc::now().timestamp();
         let expiry = now + (expiry_days * 24 * 60 * 60);
 
+        let salt = SaltString::generate(&mut rand::thread_rng());
+        let salt_str = salt.as_str().to_string();
+
+        let hashed = Self::hash_account_v2(account_number, &salt_str)?;
+
         let normalized: String = account_number
             .chars()
             .filter(|c| !c.is_whitespace())
-            .collect();
-        let hashed = self.hash_account(&normalized);
+            .collect::<String>()
+            .to_uppercase();
+
+        let prefix = if normalized.len() >= 8 {
+            &normalized[..8]
+        } else {
+            &normalized
+        };
 
         let account = Account {
             account_number: account_number.to_string(),
@@ -168,11 +240,13 @@ impl Database {
         };
 
         sqlx::query(
-            "INSERT INTO accounts (account_number, expiry_date, created_at) VALUES ($1, $2, $3)",
+            "INSERT INTO accounts (account_number, expiry_date, created_at, prefix, salt) VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&hashed)
         .bind(account.expiry_date)
         .bind(account.created_at)
+        .bind(prefix)
+        .bind(&salt_str)
         .execute(&self.pool)
         .await?;
 
@@ -180,7 +254,7 @@ impl Database {
     }
 
     pub async fn get_account(&self, account_number: &str) -> AppResult<Option<Account>> {
-        let hashed = self.hash_account(account_number);
+        let hashed = self.resolve_account_pk(account_number).await?;
         let row: Option<(i64, i64)> = sqlx::query_as(
             "SELECT expiry_date, created_at FROM accounts WHERE account_number = $1",
         )
@@ -205,7 +279,7 @@ impl Database {
         let now = Utc
             .from_utc_datetime(&today.and_hms_opt(0, 0, 0).unwrap())
             .timestamp();
-        let hashed = self.hash_account(account_id);
+        let hashed = self.resolve_account_pk(account_id).await?;
         sqlx::query(
             "INSERT INTO devices (account_id, name, added_at, attestation_pubkey) VALUES ($1, $2, $3, $4)",
         )
@@ -230,7 +304,7 @@ impl Database {
         account_id: &str,
         attestation_pubkey: &str,
     ) -> AppResult<Option<Device>> {
-        let hashed = self.hash_account(account_id);
+        let hashed = self.resolve_account_pk(account_id).await?;
         let row: Option<(String, i64, Option<String>)> = sqlx::query_as(
             "SELECT name, added_at, attestation_pubkey FROM devices WHERE account_id = $1 AND attestation_pubkey = $2",
         )
@@ -256,7 +330,7 @@ impl Database {
         expires_at: i64,
     ) -> AppResult<()> {
         let now = Utc::now().timestamp();
-        let hashed_account = self.hash_account(account_id);
+        let hashed_account = self.resolve_account_pk(account_id).await?;
         let token_hash = Self::hash_refresh_token(refresh_token);
 
         sqlx::query(
@@ -274,13 +348,44 @@ impl Database {
         Ok(())
     }
 
+    pub async fn rotate_refresh_token(
+        &self,
+        account_id: &str,
+        device_name: &str,
+        old_token: &str,
+        new_token: &str,
+        new_expires_at: i64,
+    ) -> AppResult<bool> {
+        let now = Utc::now().timestamp();
+        let hashed_account = self.resolve_account_pk(account_id).await?;
+        let old_hash = Self::hash_refresh_token(old_token);
+        let new_hash = Self::hash_refresh_token(new_token);
+
+        let res = sqlx::query(
+            "UPDATE refresh_tokens 
+             SET token_hash = $1, issued_at = $2, expires_at = $3 
+             WHERE account_id = $4 AND device_name = $5 AND token_hash = $6 AND expires_at >= $7",
+        )
+        .bind(&new_hash)
+        .bind(now)
+        .bind(new_expires_at)
+        .bind(&hashed_account)
+        .bind(device_name)
+        .bind(&old_hash)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
+    }
+
     pub async fn validate_refresh_token(
         &self,
         account_id: &str,
         device_name: &str,
         refresh_token: &str,
     ) -> AppResult<bool> {
-        let hashed_account = self.hash_account(account_id);
+        let hashed_account = self.resolve_account_pk(account_id).await?;
         let token_hash = Self::hash_refresh_token(refresh_token);
         let row: Option<(i64,)> = sqlx::query_as(
             "SELECT expires_at FROM refresh_tokens WHERE account_id = $1 AND device_name = $2 AND token_hash = $3",
@@ -303,7 +408,7 @@ impl Database {
         account_id: &str,
         device_name: &str,
     ) -> AppResult<()> {
-        let hashed_account = self.hash_account(account_id);
+        let hashed_account = self.resolve_account_pk(account_id).await?;
         sqlx::query("DELETE FROM refresh_tokens WHERE account_id = $1 AND device_name = $2")
             .bind(&hashed_account)
             .bind(device_name)
@@ -313,7 +418,7 @@ impl Database {
     }
 
     pub async fn get_devices(&self, account_id: &str) -> AppResult<Vec<Device>> {
-        let hashed = self.hash_account(account_id);
+        let hashed = self.resolve_account_pk(account_id).await?;
         let rows: Vec<(String, i64, Option<String>)> = sqlx::query_as(
             "SELECT name, added_at, attestation_pubkey FROM devices WHERE account_id = $1",
         )
@@ -334,7 +439,7 @@ impl Database {
     }
 
     pub async fn remove_device(&self, account_id: &str, name: &str) -> AppResult<bool> {
-        let hashed = self.hash_account(account_id);
+        let hashed = self.resolve_account_pk(account_id).await?;
         let res = sqlx::query("DELETE FROM devices WHERE account_id = $1 AND name = $2")
             .bind(&hashed)
             .bind(name)
@@ -350,7 +455,7 @@ impl Database {
         name: &str,
         attestation_pubkey: &str,
     ) -> AppResult<bool> {
-        let hashed = self.hash_account(account_id);
+        let hashed = self.resolve_account_pk(account_id).await?;
         let res = sqlx::query(
             "UPDATE devices SET attestation_pubkey = $1 WHERE account_id = $2 AND name = $3",
         )
@@ -367,7 +472,7 @@ impl Database {
         account_id: &str,
         name: &str,
     ) -> AppResult<Option<String>> {
-        let hashed = self.hash_account(account_id);
+        let hashed = self.resolve_account_pk(account_id).await?;
         let row: Option<(Option<String>,)> = sqlx::query_as(
             "SELECT attestation_pubkey FROM devices WHERE account_id = $1 AND name = $2",
         )
@@ -453,14 +558,49 @@ impl Database {
             }
         };
 
-        let assigned_ip = Self::map_id_to_ip(row_id);
-        info!("Allocating anonymous IP {} for public key", assigned_ip);
+        let mut allocated = false;
+        let mut assigned_ip = String::new();
 
-        sqlx::query("UPDATE peers SET assigned_ip = $1 WHERE id = $2")
-            .bind(&assigned_ip)
-            .bind(row_id)
-            .execute(&mut *tx)
-            .await?;
+        for offset in 0..10 {
+            let candidate_id = row_id.wrapping_add(offset);
+            let candidate_ip = Self::map_id_to_ip(candidate_id);
+
+            match sqlx::query("UPDATE peers SET assigned_ip = $1 WHERE id = $2")
+                .bind(&candidate_ip)
+                .bind(row_id)
+                .execute(&mut *tx)
+                .await
+            {
+                Ok(_) => {
+                    allocated = true;
+                    assigned_ip = candidate_ip;
+                    if offset > 0 {
+                        info!(
+                            "Allocated IP {} with offset {} due to collision",
+                            assigned_ip, offset
+                        );
+                    } else {
+                        info!("Allocating anonymous IP {} for public key", assigned_ip);
+                    }
+                    break;
+                }
+                Err(Error::Database(db_err)) if db_err.is_unique_violation() => {
+                    tracing::warn!("IP collision for {}, retrying...", candidate_ip);
+                    continue;
+                }
+                Err(e) => {
+                    tx.rollback().await?;
+                    return Err(e.into());
+                }
+            }
+        }
+
+        if !allocated {
+            tx.rollback().await?;
+            return Err(AppError::BadRequest(
+                "Failed to allocate IP address: Pool saturated or high collision rate".to_string(),
+            ));
+        }
 
         tx.commit().await?;
         Ok(assigned_ip)

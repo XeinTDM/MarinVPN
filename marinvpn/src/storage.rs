@@ -1,16 +1,20 @@
 use crate::models::SettingsState;
 use directories::ProjectDirs;
 use keyring::Entry;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tracing::{error, info};
 
 const KEYRING_SERVICE: &str = "marinvpn";
 const CONFIG_FILENAME: &str = "marinvpn_config.json";
 const DEVICE_KEYRING_KEY: &str = "device_attestation_key";
 const REFRESH_TOKEN_KEY: &str = "refresh_token";
+
+static CONFIG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Serialize, Deserialize, Default, PartialEq, Clone)]
 pub struct AppConfig {
@@ -62,7 +66,7 @@ fn get_device_key_entry() -> Result<Entry, keyring::Error> {
     Entry::new(KEYRING_SERVICE, DEVICE_KEYRING_KEY)
 }
 
-pub fn load_config() -> AppConfig {
+fn load_config_inner() -> AppConfig {
     let path = get_config_path();
     let mut config = match fs::read_to_string(&path) {
         Ok(contents) => {
@@ -79,7 +83,10 @@ pub fn load_config() -> AppConfig {
                     if let Some(acc) = legacy_account {
                         info!("Found legacy plain-text account number. Migrating to secure storage...");
                         cfg.account_number = Some(acc);
-                        if let Err(e) = save_config(&cfg) {
+                        // We are inside inner, so calling save_config_inner is safe if we were called from a locked context.
+                        // But load_config_inner might be called from load_config (locked).
+                        // So calling save_config_inner here is correct.
+                        if let Err(e) = save_config_inner(&cfg) {
                             error!("Failed to migrate account number to secure storage: {}", e);
                         }
                     }
@@ -119,7 +126,12 @@ pub fn load_config() -> AppConfig {
     config
 }
 
-pub fn save_config(config: &AppConfig) -> std::io::Result<()> {
+pub fn load_config() -> AppConfig {
+    let _guard = CONFIG_LOCK.lock().unwrap();
+    load_config_inner()
+}
+
+fn save_config_inner(config: &AppConfig) -> std::io::Result<()> {
     if let Ok(entry) = get_account_entry() {
         if let Some(ref acc) = config.account_number {
             let _ = entry.set_password(acc);
@@ -152,20 +164,51 @@ pub fn save_config(config: &AppConfig) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn save_config(config: &AppConfig) -> std::io::Result<()> {
+    let _guard = CONFIG_LOCK.lock().unwrap();
+    save_config_inner(config)
+}
+
 pub fn save_settings(settings: SettingsState) -> std::io::Result<()> {
-    let mut config = load_config();
+    let _guard = CONFIG_LOCK.lock().unwrap();
+    let mut config = load_config_inner();
     config.settings = Some(settings);
-    save_config(&config)
+    save_config_inner(&config)
+}
+
+pub fn save_favorites(favorites: HashSet<String>) -> std::io::Result<()> {
+    let _guard = CONFIG_LOCK.lock().unwrap();
+    let mut config = load_config_inner();
+    config.favorites = Some(favorites);
+    save_config_inner(&config)
+}
+
+pub fn save_auth_info(
+    account_number: Option<String>,
+    auth_token: Option<String>,
+    refresh_token: Option<String>,
+    account_expiry: Option<i64>,
+    device_name: Option<String>,
+) -> std::io::Result<()> {
+    let _guard = CONFIG_LOCK.lock().unwrap();
+    let mut config = load_config_inner();
+    config.account_number = account_number;
+    config.auth_token = auth_token;
+    config.refresh_token = refresh_token;
+    config.account_expiry = account_expiry;
+    config.device_name = device_name;
+    save_config_inner(&config)
 }
 
 pub fn update_auth_tokens(
     auth_token: Option<String>,
     refresh_token: Option<String>,
 ) -> std::io::Result<()> {
-    let mut config = load_config();
+    let _guard = CONFIG_LOCK.lock().unwrap();
+    let mut config = load_config_inner();
     config.auth_token = auth_token;
     config.refresh_token = refresh_token;
-    save_config(&config)
+    save_config_inner(&config)
 }
 
 pub fn load_device_attestation_key() -> Option<String> {

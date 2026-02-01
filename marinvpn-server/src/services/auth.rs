@@ -195,7 +195,7 @@ fn write_private_key(path: &Path, data: &[u8]) -> std::io::Result<()> {
 pub fn create_token(account_number: &str, device: &str, secret: &str) -> AppResult<String> {
     let expiration = Utc::now()
         .checked_add_signed(Duration::minutes(15))
-        .expect("valid timestamp")
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Invalid timestamp")))?
         .timestamp();
 
     create_token_with_exp(account_number, device, secret, expiration, "access")
@@ -208,7 +208,7 @@ pub fn create_refresh_token(
 ) -> AppResult<(String, i64)> {
     let expiration = Utc::now()
         .checked_add_signed(Duration::days(30))
-        .expect("valid timestamp")
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Invalid timestamp")))?
         .timestamp();
 
     let token = create_token_with_exp(account_number, device, secret, expiration, "refresh")?;

@@ -87,7 +87,11 @@ pub async fn get_anonymous_config(
     let servers = state.db.get_servers_by_location(country).await?;
     let server = servers
         .into_iter()
-        .min_by(|a, b| a.health_score().partial_cmp(&b.health_score()).unwrap())
+        .min_by(|a, b| {
+            a.health_score()
+                .partial_cmp(&b.health_score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .ok_or(AppError::BadRequest(
             "No active servers in this location".to_string(),
         ))?;
@@ -190,7 +194,11 @@ pub async fn get_vpn_config(
     let servers = state.db.get_servers_by_location(country).await?;
     let server = servers
         .into_iter()
-        .min_by(|a, b| a.health_score().partial_cmp(&b.health_score()).unwrap())
+        .min_by(|a, b| {
+            a.health_score()
+                .partial_cmp(&b.health_score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .ok_or(AppError::BadRequest(
             "No active servers in this location".to_string(),
         ))?;

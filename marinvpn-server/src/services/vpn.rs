@@ -1,5 +1,5 @@
 use crate::error::AppResult;
-use std::process::Command;
+use tokio::process::Command;
 use tracing::{error, info, warn};
 
 pub struct VpnOrchestrator {
@@ -9,8 +9,18 @@ pub struct VpnOrchestrator {
 
 impl VpnOrchestrator {
     pub fn new(interface: String) -> Self {
-        let mock_mode = Command::new("wg").arg("--version").output().is_err();
+        let mock_mode = std::process::Command::new("wg")
+            .arg("--version")
+            .output()
+            .is_err();
+
+        let run_mode = std::env::var("RUN_MODE").unwrap_or_else(|_| "development".to_string());
+        let is_prod = matches!(run_mode.to_lowercase().as_str(), "production" | "prod");
+
         if mock_mode {
+            if is_prod {
+                panic!("CRITICAL: 'wg' command not found in PRODUCTION mode. Server cannot start.");
+            }
             warn!("'wg' command not found. VpnOrchestrator running in MOCK mode.");
         }
 
@@ -46,7 +56,8 @@ impl VpnOrchestrator {
             .arg(pub_key)
             .arg("allowed-ips")
             .arg(format!("{}/32", ip_only))
-            .output();
+            .output()
+            .await;
 
         match output {
             Ok(out) if out.status.success() => {
@@ -88,7 +99,8 @@ impl VpnOrchestrator {
             .arg("peer")
             .arg(pub_key)
             .arg("remove")
-            .output();
+            .output()
+            .await;
 
         match output {
             Ok(out) if out.status.success() => Ok(()),
@@ -114,10 +126,12 @@ impl VpnOrchestrator {
 
         let _ = Command::new("ip")
             .args(["link", "delete", &self.interface])
-            .status();
+            .status()
+            .await;
         let _ = Command::new("ip")
             .args(["link", "add", &self.interface, "type", "wireguard"])
-            .status();
+            .status()
+            .await;
 
         Ok(())
     }

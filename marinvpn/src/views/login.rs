@@ -58,7 +58,7 @@ pub fn Login() -> Element {
                         );
                     }
                 }
-                Err(e) => toasts.show(&e, ToastType::Error),
+                Err(e) => toasts.show(&e.user_friendly_message(), ToastType::Error),
             }
             is_loading.set(false);
         });
@@ -72,7 +72,7 @@ pub fn Login() -> Element {
                     account_input.set(num);
                     toasts.show("New account generated", ToastType::Info);
                 }
-                Err(e) => toasts.show(&e, ToastType::Error),
+                Err(e) => toasts.show(&e.user_friendly_message(), ToastType::Error),
             }
             is_loading.set(false);
         });
@@ -202,7 +202,7 @@ pub fn Login() -> Element {
                                                                 );
                                                             }
                                                         }
-                                                        Err(e) => toasts.show(&e, ToastType::Error),
+                                                        Err(e) => toasts.show(&e.user_friendly_message(), ToastType::Error),
                                                     }
                                                 });
                                             },

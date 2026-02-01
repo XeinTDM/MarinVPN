@@ -34,6 +34,7 @@ num-integer = "0.1"
 num-bigint-dig = "0.8"
 ring = "0.17"
 rfd = "0.14"
+thiserror = "2.0.18"
 [features]
 default = ["desktop"]
 web = ["dioxus/web"]
@@ -43,6 +44,7 @@ server = ["dioxus/server"]
 
 [dev-dependencies]
 serial_test = "3.3.1"
+dioxus-ssr = "0.6.0"
 
 [profile.release]
 opt-level = "z"

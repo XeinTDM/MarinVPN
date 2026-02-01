@@ -204,3 +204,11 @@ impl LocationInfo {
         Self { country, city }
     }
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum VpnAction {
+    Connect(String),
+    MultiHopConnect(String, String),
+    Disconnect,
+    Reconnect,
+}

@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use crate::models::CommonVpnServer;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use once_cell::sync::Lazy;
@@ -15,7 +16,7 @@ static SERVER_CACHE: Lazy<Mutex<(Vec<CommonVpnServer>, Instant)>> =
     Lazy::new(|| Mutex::new((Vec::new(), Instant::now() - Duration::from_secs(3600))));
 
 impl ServersService {
-    pub async fn get_servers() -> Result<Vec<CommonVpnServer>, String> {
+    pub async fn get_servers() -> Result<Vec<CommonVpnServer>, AppError> {
         let mut cache = SERVER_CACHE.lock().await;
         if !cache.0.is_empty() && cache.1.elapsed() < Duration::from_secs(300) {
             return Ok(cache.0.clone());
@@ -26,22 +27,25 @@ impl ServersService {
             .get(format!("{}/vpn/servers", *API_BASE))
             .send()
             .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+            .map_err(AppError::Network)?;
 
         if !res.status().is_success() {
-            return Err(format!("Server error: {}", res.status()));
+            return Err(AppError::Api {
+                status: res.status(),
+                message: res.text().await.unwrap_or_default(),
+            });
         }
 
         let servers: Vec<CommonVpnServer> = res
             .json()
             .await
-            .map_err(|e| format!("Server error: {}", e))?;
+            .map_err(AppError::Network)?;
 
         *cache = (servers.clone(), Instant::now());
         Ok(servers)
     }
 
-    pub async fn find_best_server(country: Option<&str>) -> Result<CommonVpnServer, String> {
+    pub async fn find_best_server(country: Option<&str>) -> Result<CommonVpnServer, AppError> {
         let servers = Self::get_servers().await?;
         let candidates: Vec<CommonVpnServer> = if let Some(c) = country {
             servers.into_iter().filter(|s| s.country == c).collect()
@@ -55,7 +59,7 @@ impl ServersService {
     pub async fn find_best_server_excluding(
         country: Option<&str>,
         exclude_locations: &[String],
-    ) -> Result<CommonVpnServer, String> {
+    ) -> Result<CommonVpnServer, AppError> {
         if exclude_locations.is_empty() {
             return Self::find_best_server(country).await;
         }
@@ -81,9 +85,9 @@ impl ServersService {
 
     async fn select_best_server_from_candidates(
         candidates: Vec<CommonVpnServer>,
-    ) -> Result<CommonVpnServer, String> {
+    ) -> Result<CommonVpnServer, AppError> {
         if candidates.is_empty() {
-            return Err("No servers found".to_string());
+            return Err(AppError::Vpn("No servers found".to_string()));
         }
 
         let mut futures = FuturesUnordered::new();
@@ -100,14 +104,19 @@ impl ServersService {
         while let Some((server, latency)) = futures.next().await {
             let local_score = (server.current_load as f64 * 0.7) + (latency as f64 * 0.3);
 
-            if best_option.is_none() || local_score < best_option.as_ref().unwrap().1 {
+            let is_better = match &best_option {
+                Some((_, best_score)) => local_score < *best_score,
+                None => true,
+            };
+
+            if is_better {
                 best_option = Some((server, local_score));
             }
         }
 
         best_option
             .map(|(s, _)| s)
-            .ok_or_else(|| "Failed to measure any server".to_string())
+            .ok_or_else(|| AppError::Vpn("Failed to measure any server".to_string()))
     }
 
     pub async fn measure_latency(endpoint: &str) -> Option<u32> {

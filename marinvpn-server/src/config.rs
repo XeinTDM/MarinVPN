@@ -86,6 +86,9 @@ fn validate_settings(settings: &Settings, run_mode: &str) -> Result<(), ConfigEr
     if is_default_or_weak(&settings.auth.jwt_secret) {
         bad.push("auth.jwt_secret");
     }
+    if is_default_or_weak(&settings.auth.attestation_secret) {
+        bad.push("auth.attestation_secret");
+    }
     if is_default_or_weak(&settings.auth.account_salt) {
         bad.push("auth.account_salt");
     }

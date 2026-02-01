@@ -2,6 +2,7 @@
 
 pub mod components;
 pub mod data;
+pub mod error;
 pub mod hooks;
 pub mod i18n;
 pub mod icons;

@@ -1,6 +1,10 @@
-use crate::models::ConnectionStatus;
+pub mod use_account;
+pub mod use_connection;
+pub mod use_servers;
+pub mod tests;
+
+use crate::models::{ConnectionStatus, VpnAction};
 use crate::state::ConnectionState;
-use crate::state::VpnAction;
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy)]

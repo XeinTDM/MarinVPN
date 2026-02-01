@@ -77,18 +77,25 @@ pub fn use_tray_management() {
             let tray_channel = TrayIconEvent::receiver();
             let mut last_click = Instant::now();
 
-            let mut rx = rx_holder_spawn.lock().unwrap().take().unwrap_or_else(|| {
-                let (_, rx) = tokio::sync::mpsc::unbounded_channel();
-                rx
-            });
-            let mut icon_rx = icon_rx_holder_spawn
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or_else(|| {
+            let mut rx = if let Ok(mut guard) = rx_holder_spawn.lock() {
+                guard.take().unwrap_or_else(|| {
                     let (_, rx) = tokio::sync::mpsc::unbounded_channel();
                     rx
-                });
+                })
+            } else {
+                let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+                rx
+            };
+
+            let mut icon_rx = if let Ok(mut guard) = icon_rx_holder_spawn.lock() {
+                guard.take().unwrap_or_else(|| {
+                    let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+                    rx
+                })
+            } else {
+                let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+                rx
+            };
 
             loop {
                 while let Ok(event) = tray_channel.try_recv() {
@@ -180,7 +187,7 @@ fn default_tray_icon() -> Icon {
     let rgba = icon_image.into_rgba8().into_vec();
     Icon::from_rgba(rgba, width, height).unwrap_or_else(|_| {
         let empty = vec![0u8; (32 * 32 * 4) as usize];
-        Icon::from_rgba(empty, 32, 32).unwrap()
+        Icon::from_rgba(empty, 32, 32).expect("Failed to create fallback empty icon")
     })
 }
 

@@ -213,34 +213,20 @@ pub async fn login(
     let device_name = if let Some(existing) = existing_device {
         existing.name
     } else if let Some(pubkey) = payload.device_pubkey.as_deref() {
-        if devices.len() >= 5 {
-            if let Some(legacy) = devices.iter().find(|d| d.attestation_pubkey.is_none()) {
-                let updated = state
-                    .db
-                    .update_device_pubkey(&account.account_number, &legacy.name, pubkey)
-                    .await?;
-                if updated {
-                    legacy.name.clone()
-                } else {
-                    let common_devices = devices
-                        .into_iter()
-                        .map(|d| marinvpn_common::Device {
-                            name: d.name,
-                            created_date: format_utc_date(d.added_at),
-                        })
-                        .collect();
-                    return Ok(Json(LoginResponse {
-                        success: false,
-                        auth_token: None,
-                        refresh_token: None,
-                        account_info: None,
-                        current_device: None,
-                        devices: Some(common_devices),
-                        error_code: Some("DEVICE_UPDATE_FAILED".to_string()),
-                        error: Some("Failed to update device key".to_string()),
-                    }));
-                }
-            } else if let Some(ref kick) = payload.kick_device {
+        if let Some(placeholder) = devices.iter().find(|d| d.attestation_pubkey.is_none()) {
+            let updated = state
+                .db
+                .update_device_pubkey(&account.account_number, &placeholder.name, pubkey)
+                .await?;
+            if updated {
+                placeholder.name.clone()
+            } else {
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "Failed to claim placeholder device"
+                )));
+            }
+        } else if devices.len() >= 5 {
+            if let Some(ref kick) = payload.kick_device {
                 let removed = state
                     .db
                     .remove_device(&account.account_number, kick)
@@ -410,14 +396,6 @@ pub async fn refresh_token(
         return Err(AppError::Unauthorized);
     }
 
-    let valid = state
-        .db
-        .validate_refresh_token(&claims.sub, &claims.device, &payload.refresh_token)
-        .await?;
-    if !valid {
-        return Err(AppError::Unauthorized);
-    }
-
     let new_access = crate::services::auth::create_token(
         &claims.sub,
         &claims.device,
@@ -428,10 +406,25 @@ pub async fn refresh_token(
         &claims.device,
         &state.settings.auth.jwt_secret,
     )?;
-    state
+
+    let success = state
         .db
-        .upsert_refresh_token(&claims.sub, &claims.device, &new_refresh, refresh_exp)
+        .rotate_refresh_token(
+            &claims.sub,
+            &claims.device,
+            &payload.refresh_token,
+            &new_refresh,
+            refresh_exp,
+        )
         .await?;
+
+    if !success {
+        tracing::warn!(
+            "Token rotation failed for {}: invalid old token or expired",
+            claims.sub
+        );
+        return Err(AppError::Unauthorized);
+    }
 
     Ok(Json(RefreshResponse {
         auth_token: new_access,

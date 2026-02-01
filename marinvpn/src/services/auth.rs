@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use crate::models::{
     ConfigRequest, Device, GenerateResponse, LoginRequest, LoginResponse, RefreshRequest,
     RefreshResponse, RemoveDeviceRequest, ReportRequest, WireGuardConfig,
@@ -37,18 +38,29 @@ static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("Failed to build secure reqwest client")
 });
 
-fn api_base() -> Result<String, String> {
-    let base = std::env::var("MARIN_API_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:3000/api/v1".to_string());
+fn api_base() -> Result<String, AppError> {
+    let base = std::env::var("MARIN_API_URL");
 
-    if is_production() && base.starts_with("http://") {
-        return Err("MARIN_API_URL must be https in production".to_string());
+    if is_production() {
+        match base {
+            Ok(url) => {
+                if url.starts_with("http://") {
+                    return Err(AppError::Config(
+                        "MARIN_API_URL must be https in production".to_string(),
+                    ));
+                }
+                Ok(url)
+            }
+            Err(_) => Err(AppError::Config(
+                "MARIN_API_URL environment variable must be set in production".to_string(),
+            )),
+        }
+    } else {
+        Ok(base.unwrap_or_else(|_| "http://127.0.0.1:3000/api/v1".to_string()))
     }
-
-    Ok(base)
 }
 
-fn api_url(path: &str) -> Result<String, String> {
+fn api_url(path: &str) -> Result<String, AppError> {
     let base = api_base()?;
     let base = base.trim_end_matches('/');
     let path = path.trim_start_matches('/');
@@ -62,24 +74,24 @@ fn is_production() -> bool {
         || matches!(app_env.to_lowercase().as_str(), "production" | "prod")
 }
 
-fn device_keypair() -> Result<Ed25519KeyPair, String> {
+fn device_keypair() -> Result<Ed25519KeyPair, AppError> {
     if let Some(encoded) = crate::storage::load_device_attestation_key() {
         let raw = BASE64_STANDARD
             .decode(encoded)
-            .map_err(|_| "Invalid device attestation key in storage".to_string())?;
+            .map_err(|_| AppError::Crypto("Invalid device attestation key in storage".to_string()))?;
         return Ed25519KeyPair::from_pkcs8(raw.as_slice())
-            .map_err(|_| "Invalid device attestation key in storage".to_string());
+            .map_err(|_| AppError::Crypto("Invalid device attestation key in storage".to_string()));
     }
 
     let rng = SystemRandom::new();
     let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
-        .map_err(|_| "Failed to generate device attestation key".to_string())?;
+        .map_err(|_| AppError::Crypto("Failed to generate device attestation key".to_string()))?;
     crate::storage::save_device_attestation_key(&BASE64_STANDARD.encode(pkcs8.as_ref()));
     Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
-        .map_err(|_| "Failed to load generated device attestation key".to_string())
+        .map_err(|_| AppError::Crypto("Failed to load generated device attestation key".to_string()))
 }
 
-fn device_pubkey_b64() -> Result<String, String> {
+fn device_pubkey_b64() -> Result<String, AppError> {
     let key = device_keypair()?;
     Ok(BASE64_STANDARD.encode(key.public_key().as_ref()))
 }
@@ -93,7 +105,7 @@ fn request_with_attestation(
     method: &str,
     path: &str,
     body: Option<Vec<u8>>,
-) -> Result<reqwest::RequestBuilder, String> {
+) -> Result<reqwest::RequestBuilder, AppError> {
     let url = api_url(path)?;
     let hash = match body.as_ref() {
         Some(bytes) => body_hash_hex(bytes),
@@ -110,7 +122,7 @@ fn request_with_attestation(
     let mut rb = match method {
         "GET" => CLIENT.get(url),
         "POST" => CLIENT.post(url),
-        _ => return Err(format!("Unsupported HTTP method: {}", method)),
+        _ => return Err(AppError::Config(format!("Unsupported HTTP method: {}", method))),
     };
 
     if let Some(bytes) = body {
@@ -134,22 +146,19 @@ fn request_with_attestation(
         .header("X-Marin-Attestation-Pub", pubkey_b64))
 }
 
-fn json_body<T: Serialize>(payload: &T) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(payload).map_err(|e| format!("Failed to encode request body: {}", e))
+fn json_body<T: Serialize>(payload: &T) -> Result<Vec<u8>, AppError> {
+    serde_json::to_vec(payload).map_err(|e| AppError::Serialization(e))
 }
 
 impl AuthService {
     async fn send_authed_with_refresh<F>(
         token: &str,
         make_req: F,
-    ) -> Result<reqwest::Response, String>
+    ) -> Result<reqwest::Response, AppError>
     where
-        F: Fn(&str) -> Result<reqwest::RequestBuilder, String>,
+        F: Fn(&str) -> Result<reqwest::RequestBuilder, AppError>,
     {
-        let res = make_req(token)?
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+        let res = make_req(token)?.send().await?;
 
         if res.status() != StatusCode::UNAUTHORIZED {
             return Ok(res);
@@ -157,7 +166,7 @@ impl AuthService {
 
         let refresh = crate::storage::load_config().refresh_token;
         let Some(refresh_token) = refresh else {
-            return Err("Session expired. Please log in again.".to_string());
+            return Err(AppError::SessionExpired);
         };
 
         let refreshed = match Self::refresh_auth(&refresh_token).await {
@@ -172,10 +181,7 @@ impl AuthService {
             Some(refreshed.refresh_token.clone()),
         );
 
-        make_req(&refreshed.auth_token)?
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))
+        make_req(&refreshed.auth_token)?.send().await.map_err(AppError::from)
     }
 
     pub async fn secure_resolve(hostname: &str) -> Option<String> {
@@ -211,21 +217,23 @@ impl AuthService {
         token: &str,
         dns_blocking: Option<crate::models::DnsBlockingState>,
         quantum_resistant: bool,
-    ) -> Result<WireGuardConfig, String> {
+    ) -> Result<WireGuardConfig, AppError> {
         let rb = request_with_attestation("GET", "/api/v1/auth/blind-key", None)?;
         let key_pem = rb
             .send()
-            .await
-            .map_err(|e| format!("Failed to get blind key: {}", e))?
+            .await?
             .text()
             .await
-            .map_err(|e| format!("Failed to read blind key: {}", e))?;
+            .map_err(|e| AppError::Network(e))?;
 
         let server_pub_key = RsaPublicKey::from_public_key_pem(&key_pem)
-            .map_err(|e| format!("Invalid server public key: {}", e))?;
+            .map_err(|e| AppError::Crypto(format!("Invalid server public key: {}", e)))?;
 
-        let mut rng = thread_rng();
-        let m_bytes: [u8; 32] = rng.gen();
+        // Scope RNG usage
+        let m_bytes: [u8; 32] = {
+            let mut rng = thread_rng();
+            rng.gen()
+        };
 
         let mut hasher = Blake2s::new();
         hasher.update(b"MARIN_VPN_BLIND_SIG_V1");
@@ -235,11 +243,14 @@ impl AuthService {
         let n = server_pub_key.n();
         let e = server_pub_key.e();
         let mut r;
-        loop {
-            let r_bytes: [u8; 32] = rng.gen();
-            r = BigUint::from_bytes_be(&r_bytes);
-            if r > BigUint::from(1u32) && r < *n && r.clone().gcd(n) == BigUint::from(1u32) {
-                break;
+        {
+            let mut rng = thread_rng();
+            loop {
+                let r_bytes: [u8; 32] = rng.gen();
+                r = BigUint::from_bytes_be(&r_bytes);
+                if r > BigUint::from(1u32) && r < *n && r.clone().gcd(n) == BigUint::from(1u32) {
+                    break;
+                }
             }
         }
 
@@ -261,25 +272,25 @@ impl AuthService {
         .await?;
 
         if !res.status().is_success() {
-            return Err(format!("Failed to issue blind token: {}", res.status()));
+            return Err(AppError::Api {
+                status: res.status(),
+                message: "Failed to issue blind token".to_string(),
+            });
         }
 
-        let blind_resp = res
-            .json::<BlindTokenResponse>()
-            .await
-            .map_err(|e| format!("Invalid server response: {}", e))?;
+        let blind_resp = res.json::<BlindTokenResponse>().await?;
 
         let s_prime_bytes = BASE64_STANDARD
             .decode(&blind_resp.signed_blinded_message)
-            .map_err(|_| "Invalid base64 in signed blinded message")?;
+            .map_err(|_| AppError::Crypto("Invalid base64 in signed blinded message".to_string()))?;
         let s_prime = BigUint::from_bytes_be(&s_prime_bytes);
 
-        let r_inv_bi = r.mod_inverse(n).ok_or("Failed to compute mod inverse")?;
-        let r_inv = r_inv_bi.to_biguint().ok_or("Inverse is negative")?;
+        let r_inv_bi = r.mod_inverse(n).ok_or(AppError::Crypto("Failed to compute mod inverse".to_string()))?;
+        let r_inv = r_inv_bi.to_biguint().ok_or(AppError::Crypto("Inverse is negative".to_string()))?;
         let s = (s_prime * r_inv) % n;
 
         if s.modpow(e, n) != hashed_m {
-            return Err("Blind signature verification failed locally!".to_string());
+            return Err(AppError::Crypto("Blind signature verification failed locally!".to_string()));
         }
 
         let private_key = StaticSecret::random_from_rng(thread_rng());
@@ -318,44 +329,38 @@ impl AuthService {
             Some(json_body(&anon_req)?),
         )?;
 
-        let res = rb
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+        let res = rb.send().await?;
 
         if !res.status().is_success() {
-            return Err(format!(
-                "Server error ({}): {}",
-                res.status(),
-                res.text().await.unwrap_or_default()
-            ));
+            return Err(AppError::Api {
+                status: res.status(),
+                message: res.text().await.unwrap_or_default(),
+            });
         }
 
-        let mut config = res
-            .json::<WireGuardConfig>()
-            .await
-            .map_err(|e| format!("Server error decoding config: {}", e))?;
+        let mut config = res.json::<WireGuardConfig>().await?;
 
         if let (Some(sk), Some(ct_b64)) = (pqc_sk, &config.pqc_ciphertext) {
             let ct_bytes = BASE64_STANDARD
                 .decode(ct_b64)
-                .map_err(|_| "Invalid PQC ciphertext")?;
+                .map_err(|_| AppError::Crypto("Invalid PQC ciphertext".to_string()))?;
             let ct = ml_kem::Ciphertext::<MlKem768>::try_from(ct_bytes.as_slice())
-                .map_err(|_| "Invalid PQC CT length")?;
+                .map_err(|_| AppError::Crypto("Invalid PQC CT length".to_string()))?;
             let ss = sk
                 .decapsulate(&ct)
-                .map_err(|_| "PQC Decapsulation failed")?;
+                .map_err(|_| AppError::Crypto("PQC Decapsulation failed".to_string()))?;
             config.preshared_key = Some(BASE64_STANDARD.encode(ss.as_slice()));
         }
 
         config.private_key = priv_base64;
+
         Ok(config)
     }
 
     pub async fn login(
         account_number: &str,
         kick_device: Option<String>,
-    ) -> Result<LoginResponse, String> {
+    ) -> Result<LoginResponse, AppError> {
         let login_req = LoginRequest {
             account_number: account_number.to_string(),
             device_pubkey: Some(device_pubkey_b64()?),
@@ -367,40 +372,39 @@ impl AuthService {
             Some(json_body(&login_req)?),
         )?;
 
-        let res = rb
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+        let res = rb.send().await?;
 
-        let data = res
-            .json::<LoginResponse>()
-            .await
-            .map_err(|e| format!("Server error: {}", e))?;
+        if !res.status().is_success() {
+             return Err(AppError::Api {
+                status: res.status(),
+                message: res.text().await.unwrap_or_default(),
+            });
+        }
+
+        let data = res.json::<LoginResponse>().await?;
 
         Ok(data)
     }
 
-    pub async fn refresh_auth(refresh_token: &str) -> Result<RefreshResponse, String> {
+    pub async fn refresh_auth(refresh_token: &str) -> Result<RefreshResponse, AppError> {
         let req = RefreshRequest {
             refresh_token: refresh_token.to_string(),
         };
         let rb = request_with_attestation("POST", "/api/v1/auth/refresh", Some(json_body(&req)?))?;
 
-        let res = rb
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+        let res = rb.send().await?;
 
         if !res.status().is_success() {
-            return Err(format!("Server error: {}", res.status()));
+            return Err(AppError::Api {
+                status: res.status(),
+                message: res.text().await.unwrap_or_default(),
+            });
         }
 
-        res.json::<RefreshResponse>()
-            .await
-            .map_err(|e| format!("Server error: {}", e))
+        Ok(res.json::<RefreshResponse>().await?)
     }
 
-    pub async fn get_devices(account_number: &str, token: &str) -> Result<Vec<Device>, String> {
+    pub async fn get_devices(account_number: &str, token: &str) -> Result<Vec<Device>, AppError> {
         let login_req = LoginRequest {
             account_number: account_number.to_string(),
             device_pubkey: None,
@@ -417,13 +421,13 @@ impl AuthService {
         .await?;
 
         if !res.status().is_success() {
-            return Err(format!("Server error: {}", res.status()));
+             return Err(AppError::Api {
+                status: res.status(),
+                message: res.text().await.unwrap_or_default(),
+            });
         }
 
-        let devices = res
-            .json::<Vec<Device>>()
-            .await
-            .map_err(|e| format!("Server error: {}", e))?;
+        let devices = res.json::<Vec<Device>>().await?;
 
         Ok(devices)
     }
@@ -432,7 +436,7 @@ impl AuthService {
         account_number: &str,
         device_name: &str,
         token: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, AppError> {
         let remove_req = RemoveDeviceRequest {
             account_number: account_number.to_string(),
             device_name: device_name.to_string(),
@@ -447,10 +451,14 @@ impl AuthService {
         })
         .await?;
 
-        let success = res
-            .json::<bool>()
-            .await
-            .map_err(|e| format!("Server error: {}", e))?;
+        if !res.status().is_success() {
+             return Err(AppError::Api {
+                status: res.status(),
+                message: res.text().await.unwrap_or_default(),
+            });
+        }
+
+        let success = res.json::<bool>().await?;
 
         Ok(success)
     }
@@ -459,18 +467,17 @@ impl AuthService {
         account_number: &str,
         message: &str,
         token: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, AppError> {
         let rb = request_with_attestation("GET", "/api/v1/auth/support-key", None)?;
         let key_pem = rb
             .send()
-            .await
-            .map_err(|e| format!("Failed to get support key: {}", e))?
+            .await?
             .text()
             .await
-            .map_err(|e| format!("Failed to read support key: {}", e))?;
+            .map_err(|e| AppError::Network(e))?;
 
         let pub_key = RsaPublicKey::from_public_key_pem(&key_pem)
-            .map_err(|e| format!("Invalid support public key: {}", e))?;
+            .map_err(|e| AppError::Crypto(format!("Invalid support public key: {}", e)))?;
 
         let mut rng = thread_rng();
         let enc_data = if !message.is_empty() {
@@ -481,7 +488,7 @@ impl AuthService {
             for chunk in msg_bytes.chunks(max_chunk) {
                 let enc = pub_key
                     .encrypt(&mut rng, rsa::Oaep::new::<Sha256>(), chunk)
-                    .map_err(|e| format!("Encryption failed: {}", e))?;
+                    .map_err(|e| AppError::Crypto(format!("Encryption failed: {}", e)))?;
                 encrypted_chunks.push(BASE64_STANDARD.encode(enc));
             }
             encrypted_chunks.join("|")
@@ -500,25 +507,30 @@ impl AuthService {
         })
         .await?;
 
-        let success = res
-            .json::<bool>()
-            .await
-            .map_err(|e| format!("Server error: {}", e))?;
+        if !res.status().is_success() {
+             return Err(AppError::Api {
+                status: res.status(),
+                message: res.text().await.unwrap_or_default(),
+            });
+        }
+
+        let success = res.json::<bool>().await?;
 
         Ok(success)
     }
 
-    pub async fn generate_account_number() -> Result<String, String> {
+    pub async fn generate_account_number() -> Result<String, AppError> {
         let rb = request_with_attestation("POST", "/api/v1/account/generate", None)?;
-        let res = rb
-            .send()
-            .await
-            .map_err(|e| format!("Connection error: {}", e))?;
+        let res = rb.send().await?;
 
-        let data = res
-            .json::<GenerateResponse>()
-            .await
-            .map_err(|e| format!("Server error: {}", e))?;
+        if !res.status().is_success() {
+             return Err(AppError::Api {
+                status: res.status(),
+                message: res.text().await.unwrap_or_default(),
+            });
+        }
+
+        let data = res.json::<GenerateResponse>().await?;
 
         Ok(data.account_number)
     }
@@ -529,7 +541,7 @@ impl AuthService {
         token: &str,
         dns_blocking: Option<crate::models::DnsBlockingState>,
         quantum_resistant: bool,
-    ) -> Result<WireGuardConfig, String> {
+    ) -> Result<WireGuardConfig, AppError> {
         let private_key = StaticSecret::random_from_rng(thread_rng());
         let public_key = PublicKey::from(&private_key);
 
@@ -568,23 +580,23 @@ impl AuthService {
         if !res.status().is_success() {
             let status = res.status();
             let err_body = res.text().await.unwrap_or_default();
-            return Err(format!("Server error ({}): {}", status, err_body));
+            return Err(AppError::Api {
+                status,
+                message: err_body,
+            });
         }
 
-        let mut config = res
-            .json::<WireGuardConfig>()
-            .await
-            .map_err(|e| format!("Server error: {}", e))?;
+        let mut config = res.json::<WireGuardConfig>().await?;
 
         if let (Some(sk), Some(ct_b64)) = (pqc_sk, &config.pqc_ciphertext) {
             let ct_bytes = BASE64_STANDARD
                 .decode(ct_b64)
-                .map_err(|_| "Invalid PQC ciphertext")?;
+                .map_err(|_| AppError::Crypto("Invalid PQC ciphertext".to_string()))?;
             let ct = ml_kem::Ciphertext::<MlKem768>::try_from(ct_bytes.as_slice())
-                .map_err(|_| "Invalid PQC CT length")?;
+                .map_err(|_| AppError::Crypto("Invalid PQC CT length".to_string()))?;
             let ss = sk
                 .decapsulate(&ct)
-                .map_err(|_| "PQC Decapsulation failed")?;
+                .map_err(|_| AppError::Crypto("PQC Decapsulation failed".to_string()))?;
             config.preshared_key = Some(BASE64_STANDARD.encode(ss.as_slice()));
         }
 
