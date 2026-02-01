@@ -692,10 +692,22 @@ impl WgRunner for SimulationRunner {
 struct RunnerState {
     last_stats: Option<VpnStats>,
     last_check: Option<Instant>,
+    bypass_routes: Vec<String>,
     #[cfg(target_os = "linux")]
     original_resolv_conf: Option<String>,
     #[cfg(target_os = "linux")]
     systemd_dns_applied: bool,
+    #[cfg(target_os = "windows")]
+    original_firewall_policy: Option<String>,
+    #[cfg(target_os = "windows")]
+    original_dns_snapshot: Option<Vec<DnsSnapshot>>,
+}
+
+#[cfg(target_os = "windows")]
+struct DnsSnapshot {
+    interface_alias: String,
+    address_family: String,
+    server_addresses: Vec<String>,
 }
 
 #[async_trait::async_trait]
@@ -1092,10 +1104,15 @@ impl RealWgRunner {
             state: Mutex::new(RunnerState {
                 last_stats: None,
                 last_check: None,
+                bypass_routes: Vec::new(),
                 #[cfg(target_os = "linux")]
                 original_resolv_conf: None,
                 #[cfg(target_os = "linux")]
                 systemd_dns_applied: false,
+                #[cfg(target_os = "windows")]
+                original_firewall_policy: None,
+                #[cfg(target_os = "windows")]
+                original_dns_snapshot: None,
             }),
             ws_obfuscator: Arc::new(WsObfuscator::new()),
             ss_obfuscator: Arc::new(SsObfuscator::new()),
@@ -1158,7 +1175,6 @@ impl RealWgRunner {
                 .filter(|s| !s.is_empty())
                 .collect();
 
-            // Try systemd-resolved via resolvectl first
             let resolvectl_check = Command::new("resolvectl").arg("--version").output();
             let mut applied_with_systemd = false;
             if resolvectl_check.is_ok() {
@@ -1215,6 +1231,13 @@ impl RealWgRunner {
 
         #[cfg(target_os = "windows")]
         {
+            {
+                let mut state = self.state.lock().await;
+                if state.original_dns_snapshot.is_none() {
+                    state.original_dns_snapshot = Self::capture_dns_snapshot();
+                }
+            }
+
             let first_dns = dns_servers.split(',').next().unwrap_or("1.1.1.1").trim();
             info!(
                 "Applying Windows DNS: {} to interface {}",
@@ -1248,7 +1271,6 @@ impl RealWgRunner {
                     .status();
             }
 
-            // Block standard DNS and common DoH providers on all physical adapters
             let block_leaks = format!(
                 "$iface = '{}'; \
                 Get-NetAdapter | Where-Object {{ $_.InterfaceAlias -ne $iface -and $_.InterfaceAlias -ne 'marinvpn1' }} | ForEach-Object {{ \
@@ -1284,18 +1306,165 @@ impl RealWgRunner {
 
         #[cfg(target_os = "windows")]
         {
-            info!("Restoring Windows DNS to DHCP and disabling leak protection...");
-            let name_arg = format!("name={}", self.iface_entry);
-            let _ = Command::new("netsh")
-                .args(["interface", "ipv4", "set", "dns", &name_arg, "source=dhcp"])
-                .status();
+            let snapshot = {
+                let mut state = self.state.lock().await;
+                state.original_dns_snapshot.take()
+            };
+            if let Some(snapshot) = snapshot {
+                info!("Restoring Windows DNS from snapshot...");
+                Self::restore_dns_snapshot(&snapshot);
+            } else {
+                info!("No DNS snapshot available; leaving Windows DNS unchanged.");
+            }
+        }
+    }
 
-            let restore_all = "Get-NetAdapter | ForEach-Object { \
-                netsh interface ipv4 set dnsservers name=$_.InterfaceAlias source=dhcp; \
-                netsh interface ipv6 set interface $_.InterfaceAlias admin=enabled \
-            }";
+    #[cfg(target_os = "windows")]
+    fn read_firewall_policy() -> Option<String> {
+        let output = Command::new("netsh")
+            .args(["advfirewall", "show", "allprofiles"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if let Some(idx) = line.find("Firewall Policy") {
+                let value = line[idx + "Firewall Policy".len()..].trim();
+                if !value.is_empty() {
+                    return Some(value.replace(' ', "").to_lowercase());
+                }
+            }
+        }
+        None
+    }
+
+    async fn clear_bypass_routes(&self) {
+        let routes = {
+            let mut state = self.state.lock().await;
+            std::mem::take(&mut state.bypass_routes)
+        };
+
+        for ip in routes {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = Command::new("ip").args(["route", "del", &ip]).status();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = Command::new("route").args(["delete", &ip]).status();
+            }
+        }
+    }
+
+    async fn resolve_endpoint_ips(host: &str) -> (Vec<String>, Vec<String>) {
+        let host = host.trim();
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            if host.contains(':') {
+                return (Vec::new(), vec![host.to_string()]);
+            }
+            return (vec![host.to_string()], Vec::new());
+        }
+        let mut v4 = Vec::new();
+        let mut v6 = Vec::new();
+        if let Ok(lookup) = tokio::net::lookup_host(format!("{}:0", host)).await {
+            for addr in lookup {
+                let ip = addr.ip();
+                let ip_str = ip.to_string();
+                if ip.is_ipv4() {
+                    if !v4.contains(&ip_str) {
+                        v4.push(ip_str);
+                    }
+                } else if !v6.contains(&ip_str) {
+                    v6.push(ip_str);
+                }
+            }
+        }
+        (v4, v6)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn capture_dns_snapshot() -> Option<Vec<DnsSnapshot>> {
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-DnsClientServerAddress -AddressFamily IPv4,IPv6 | \
+                 Select-Object -Property InterfaceAlias,AddressFamily,ServerAddresses | ConvertTo-Json -Compress",
+            ])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.trim().is_empty() {
+            return None;
+        }
+
+        #[derive(serde::Deserialize)]
+        struct DnsRow {
+            #[serde(rename = "InterfaceAlias")]
+            interface_alias: String,
+            #[serde(rename = "AddressFamily")]
+            address_family: Option<String>,
+            #[serde(rename = "ServerAddresses")]
+            server_addresses: Option<Vec<String>>,
+        }
+
+        let parsed: Result<Vec<DnsRow>, _> = serde_json::from_str(&text);
+        let rows = match parsed {
+            Ok(rows) => rows,
+            Err(_) => {
+                let single: DnsRow = serde_json::from_str(&text).ok()?;
+                vec![single]
+            }
+        };
+
+        let snapshot = rows
+            .into_iter()
+            .filter_map(|row| {
+                row.server_addresses.map(|servers| DnsSnapshot {
+                    interface_alias: row.interface_alias,
+                    address_family: row.address_family.unwrap_or_else(|| "IPv4".to_string()),
+                    server_addresses: servers,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if snapshot.is_empty() {
+            None
+        } else {
+            Some(snapshot)
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn restore_dns_snapshot(snapshot: &[DnsSnapshot]) {
+        for entry in snapshot {
+            let family = match entry.address_family.as_str() {
+                "IPv4" | "IPv6" => entry.address_family.as_str(),
+                _ => continue,
+            };
+            let alias = entry.interface_alias.as_str();
+            let servers = entry.server_addresses.as_slice();
+            if servers.is_empty() {
+                continue;
+            }
+            let servers_arg = servers
+                .iter()
+                .map(|s| s.replace("'", "''"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let script = format!(
+                "Set-DnsClientServerAddress -InterfaceAlias '{}' -AddressFamily {} -ServerAddresses {}",
+                alias.replace("'", "''"),
+                family,
+                servers_arg
+            );
             let _ = Command::new("powershell")
-                .args(["-NoProfile", "-Command", restore_all])
+                .args(["-NoProfile", "-Command", &script])
                 .status();
         }
     }
@@ -1303,6 +1472,43 @@ impl RealWgRunner {
 
 #[async_trait::async_trait]
 impl WgRunner for RealWgRunner {
+    const DEFAULT_WIREGUARD_PORT: u16 = 51820;
+
+    fn parse_endpoint_host_port(endpoint: &str) -> (String, u16) {
+        let trimmed = endpoint.trim();
+        if trimmed.starts_with('[') {
+            if let Some(end_bracket) = trimmed.find(']') {
+                let host = trimmed[1..end_bracket].to_string();
+                let port = trimmed[end_bracket + 1..]
+                    .strip_prefix(':')
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(Self::DEFAULT_WIREGUARD_PORT);
+                return (host, port);
+            }
+        }
+
+        if let Some(colon_idx) = trimmed.rfind(':') {
+            let host_part = &trimmed[..colon_idx];
+            let port_part = &trimmed[colon_idx + 1..];
+            if !port_part.is_empty() && port_part.chars().all(|c| c.is_ascii_digit()) {
+                if !host_part.is_empty() {
+                    if host_part.contains(':') {
+                        if host_part.parse::<std::net::Ipv6Addr>().is_ok() {
+                            let port = port_part
+                                .parse::<u16>()
+                                .unwrap_or(Self::DEFAULT_WIREGUARD_PORT);
+                            return (host_part.to_string(), port);
+                        }
+                    } else if let Ok(port) = port_part.parse::<u16>() {
+                        return (host_part.to_string(), port);
+                    }
+                }
+            }
+        }
+
+        (trimmed.to_string(), Self::DEFAULT_WIREGUARD_PORT)
+    }
+
     async fn up(
         &self,
         entry: &WireGuardConfig,
@@ -1337,7 +1543,7 @@ impl WgRunner for RealWgRunner {
                 // Standard WireGuard
             }
             _ => {
-                // Fallback for other modes
+                // Fallback for other methods
             }
         }
 
@@ -1393,6 +1599,7 @@ impl WgRunner for RealWgRunner {
         self.lwo_obfuscator.stop().await.ok();
 
         self.restore_dns().await;
+        self.clear_bypass_routes().await;
 
         let mut state = self.state.lock().await;
         state.last_stats = None;
@@ -1472,15 +1679,45 @@ impl WgRunner for RealWgRunner {
         #[cfg(target_os = "linux")]
         {
             info!("Applying cgroup bypass: {}", app_path);
+            let cgroup_dir = "/sys/fs/cgroup/net_cls/marinvpn_bypass";
+            if !std::path::Path::new("/sys/fs/cgroup/net_cls").exists() {
+                warn!("net_cls cgroup not available; app bypass disabled.");
+                return;
+            }
+
             let commands = vec![
-                "mkdir -p /sys/fs/cgroup/net_cls/marinvpn_bypass".to_string(),
-                "echo 0x1000 > /sys/fs/cgroup/net_cls/marinvpn_bypass/net_cls.classid".to_string(),
+                format!("mkdir -p {}", cgroup_dir),
+                format!("echo 0x1000 > {}/net_cls.classid", cgroup_dir),
                 "ip rule add fwmark 0x1000 table main".to_string(),
             ];
 
             for cmd in commands {
-                let parts: Vec<&str> = cmd.split_whitespace().collect();
-                let _ = Command::new(parts[0]).args(&parts[1..]).status();
+                let _ = Command::new("sh").args(["-c", &cmd]).status();
+            }
+
+            let pid_output = Command::new("sh")
+                .args([
+                    "-c",
+                    &format!(
+                        "for p in /proc/[0-9]*/exe; do if [ \"$(readlink -f \"$p\")\" = \"{}\" ]; then echo ${p%/exe} | awk -F/ '{print $3}'; fi; done",
+                        app_path.replace('"', "\\\"")
+                    ),
+                ])
+                .output()
+                .ok();
+            let Some(output) = pid_output else {
+                warn!("Failed to locate process for bypass: {}", app_path);
+                return;
+            };
+            let pids = String::from_utf8_lossy(&output.stdout);
+            if pids.trim().is_empty() {
+                warn!("No running process found for bypass: {}", app_path);
+                return;
+            }
+
+            for pid in pids.split_whitespace() {
+                let cmd = format!("echo {} > {}/cgroup.procs", pid, cgroup_dir);
+                let _ = Command::new("sh").args(["-c", &cmd]).status();
             }
         }
 
@@ -1508,6 +1745,13 @@ impl WgRunner for RealWgRunner {
     }
 
     async fn apply_bypass_route(&self, ip: &str) {
+        {
+            let mut state = self.state.lock().await;
+            if !state.bypass_routes.iter().any(|r| r == ip) {
+                state.bypass_routes.push(ip.to_string());
+            }
+        }
+
         #[cfg(target_os = "linux")]
         {
             let get_iface = "ip route | grep default | awk '{print $5}' | head -n1";
@@ -1617,10 +1861,56 @@ impl WgRunner for RealWgRunner {
         endpoint: &str,
         settings: &SettingsState,
     ) -> Result<(), VpnError> {
+        let (host, port) = Self::parse_endpoint_host_port(endpoint);
+        let (resolved_v4, resolved_v6) = if host == "0.0.0.0" {
+            (Vec::new(), Vec::new())
+        } else {
+            Self::resolve_endpoint_ips(&host).await
+        };
+        if host != "0.0.0.0" && resolved_v4.is_empty() && resolved_v6.is_empty() {
+            return Err(VpnError::FirewallError(
+                "Failed to resolve endpoint for kill-switch".to_string(),
+            ));
+        }
+        let v4_addrs: Vec<&str> = if host == "0.0.0.0" {
+            vec!["0.0.0.0"]
+        } else {
+            resolved_v4.iter().map(|s| s.as_str()).collect()
+        };
+        let v6_addrs: Vec<&str> = resolved_v6.iter().map(|s| s.as_str()).collect();
+
+        let mut allow_rules: Vec<(&'static str, u16)> = Vec::new();
+        match settings.stealth_mode {
+            StealthMode::Automatic => {
+                allow_rules.push(("udp", port));
+                allow_rules.push(("tcp", 443));
+                allow_rules.push(("udp", 443));
+            }
+            StealthMode::WireGuardPort => {
+                allow_rules.push(("udp", 53));
+            }
+            StealthMode::Lwo => {
+                allow_rules.push(("udp", port));
+            }
+            StealthMode::Quic => {
+                allow_rules.push(("udp", 443));
+            }
+            StealthMode::Tcp => {
+                allow_rules.push(("tcp", 443));
+            }
+            StealthMode::Shadowsocks => {
+                let ss_port = if endpoint.contains(':') { port } else { 8388 };
+                allow_rules.push(("tcp", ss_port));
+                allow_rules.push(("udp", ss_port));
+            }
+            StealthMode::None => {
+                allow_rules.push(("udp", port));
+            }
+        }
+
         #[cfg(target_os = "linux")]
         {
             info!("Enabling Linux Kill-switch using nftables...");
-            let addr = endpoint.split(':').next().unwrap_or(endpoint);
 
             let run_nft = |args: &[&str]| Command::new("nft").args(args).status();
 
@@ -1669,31 +1959,92 @@ impl WgRunner for RealWgRunner {
                 "lo",
                 "accept",
             ]);
+            if v4_addrs.len() == 1 && v4_addrs[0] == "0.0.0.0" {
+                // no specific endpoint
+            } else {
+                for addr in &v4_addrs {
+                    for (proto, port) in &allow_rules {
+                        let port_str = port.to_string();
+                        let _ = run_nft(&[
+                            "add",
+                            "rule",
+                            "inet",
+                            "marinvpn_killswitch",
+                            "output",
+                            "ip",
+                            "daddr",
+                            addr,
+                            proto,
+                            "dport",
+                            &port_str,
+                            "accept",
+                        ]);
+                    }
+                }
+            }
+            if !v6_addrs.is_empty() {
+                for addr in &v6_addrs {
+                    for (proto, port) in &allow_rules {
+                        let port_str = port.to_string();
+                        let _ = run_nft(&[
+                            "add",
+                            "rule",
+                            "inet",
+                            "marinvpn_killswitch",
+                            "output",
+                            "ip6",
+                            "daddr",
+                            addr,
+                            proto,
+                            "dport",
+                            &port_str,
+                            "accept",
+                        ]);
+                    }
+                }
+            }
+
             let _ = run_nft(&[
                 "add",
                 "rule",
                 "inet",
                 "marinvpn_killswitch",
                 "output",
-                "ip6",
-                "daddr",
-                "::/0",
-                "drop",
+                "udp",
+                "sport",
+                "68",
+                "dport",
+                "67",
+                "accept",
             ]);
-
-            if addr != "0.0.0.0" {
+            if settings.ipv6_support {
                 let _ = run_nft(&[
                     "add",
                     "rule",
                     "inet",
                     "marinvpn_killswitch",
                     "output",
-                    "ip",
-                    "daddr",
-                    addr,
                     "udp",
+                    "sport",
+                    "546",
                     "dport",
-                    "51820",
+                    "547",
+                    "accept",
+                ]);
+                let _ = run_nft(&[
+                    "add",
+                    "rule",
+                    "inet",
+                    "marinvpn_killswitch",
+                    "output",
+                    "icmpv6",
+                    "type",
+                    "{",
+                    "router-solicitation,",
+                    "router-advertisement,",
+                    "neighbor-solicitation,",
+                    "neighbor-advertisement",
+                    "}",
                     "accept",
                 ]);
             }
@@ -1739,14 +2090,34 @@ impl WgRunner for RealWgRunner {
                     "accept",
                 ]);
             }
+
+            let _ = run_nft(&[
+                "add",
+                "rule",
+                "inet",
+                "marinvpn_killswitch",
+                "output",
+                "ip6",
+                "daddr",
+                "::/0",
+                "drop",
+            ]);
         }
 
         #[cfg(target_os = "windows")]
         {
             info!("Enabling Windows Global Kill-switch (Fail-Closed Policy)...");
-            let addr = endpoint.split(':').next().unwrap_or(endpoint);
 
-            // Set default outbound policy to block
+            {
+                let mut state = self.state.lock().await;
+                if state.original_firewall_policy.is_none() {
+                    state.original_firewall_policy = Self::read_firewall_policy();
+                }
+                if state.original_dns_snapshot.is_none() {
+                    state.original_dns_snapshot = Self::capture_dns_snapshot();
+                }
+            }
+
             let _ = Command::new("netsh")
                 .args([
                     "advfirewall",
@@ -1757,7 +2128,6 @@ impl WgRunner for RealWgRunner {
                 ])
                 .status();
 
-            // Allow loopback (essential for many local services)
             let allow_loopback =
                 "New-NetFirewallRule -DisplayName 'MarinVPN - Allow Loopback' -Direction Outbound \
                     -RemoteAddress 127.0.0.1,::1 -Action Allow -Profile Any -Force";
@@ -1765,17 +2135,48 @@ impl WgRunner for RealWgRunner {
                 .args(["-NoProfile", "-Command", allow_loopback])
                 .status();
 
-            if addr != "0.0.0.0" {
-                let allow_endpoint = format!(
-                        "New-NetFirewallRule -DisplayName 'MarinVPN - Allow Endpoint' -Direction Outbound \
-                        -RemoteAddress '{}' -Action Allow -Protocol UDP -Profile Any -Force", addr.replace("'", "''")
-                    );
+            if !(v4_addrs.len() == 1 && v4_addrs[0] == "0.0.0.0") {
+                for addr in &v4_addrs {
+                    for (proto, port) in &allow_rules {
+                        let allow_endpoint = format!(
+                            "New-NetFirewallRule -DisplayName 'MarinVPN - Allow Endpoint {proto}:{port}' -Direction Outbound \
+                            -RemoteAddress '{}' -RemotePort {port} -Action Allow -Protocol {proto} -Profile Any -Force",
+                            addr.replace("'", "''")
+                        );
+                        let _ = Command::new("powershell")
+                            .args(["-NoProfile", "-Command", &allow_endpoint])
+                            .status();
+                    }
+                }
+            }
+            if !v6_addrs.is_empty() {
+                for addr in &v6_addrs {
+                    for (proto, port) in &allow_rules {
+                        let allow_endpoint = format!(
+                            "New-NetFirewallRule -DisplayName 'MarinVPN - Allow Endpoint {proto}:{port}' -Direction Outbound \
+                            -RemoteAddress '{}' -RemotePort {port} -Action Allow -Protocol {proto} -Profile Any -Force",
+                            addr.replace("'", "''")
+                        );
+                        let _ = Command::new("powershell")
+                            .args(["-NoProfile", "-Command", &allow_endpoint])
+                            .status();
+                    }
+                }
+            }
+
+            if settings.ipv6_support {
+                let allow_ra = "New-NetFirewallRule -DisplayName 'MarinVPN - Allow ICMPv6 ND' -Direction Outbound \
+                        -Protocol ICMPv6 -IcmpType 133,134,135,136 -Action Allow -Profile Any -Force";
                 let _ = Command::new("powershell")
-                    .args(["-NoProfile", "-Command", &allow_endpoint])
+                    .args(["-NoProfile", "-Command", allow_ra])
+                    .status();
+                let allow_dhcpv6 = "New-NetFirewallRule -DisplayName 'MarinVPN - Allow DHCPv6' -Direction Outbound \
+                        -Protocol UDP -LocalPort 546 -RemotePort 547 -Action Allow -Profile Any -Force";
+                let _ = Command::new("powershell")
+                    .args(["-NoProfile", "-Command", allow_dhcpv6])
                     .status();
             }
 
-            // Allow traffic through the WireGuard interfaces specifically
             let allow_vpn = "Get-NetAdapter | Where-Object { $_.InterfaceDescription -like '*Wintun*' -or $_.InterfaceAlias -like 'marinvpn*' } | ForEach-Object { \
                     $alias = $_.InterfaceAlias; \
                     New-NetFirewallRule -DisplayName \"MarinVPN - Allow Tunnel $alias\" -Direction Outbound -InterfaceAlias $alias -Action Allow -Profile Any -Force \
@@ -1798,7 +2199,6 @@ impl WgRunner for RealWgRunner {
                 }
             }
 
-            // Block IPv6 on physical interfaces to prevent leaks, but allow on tunnel
             let block_v6 = "Get-NetAdapter | Where-Object { $_.InterfaceDescription -notlike '*Wintun*' -and $_.InterfaceAlias -notlike 'marinvpn*' } | ForEach-Object { \
                     $alias = $_.InterfaceAlias; \
                     New-NetFirewallRule -DisplayName \"MarinVPN - Block IPv6 $alias\" -Direction Outbound -InterfaceAlias $alias -RemoteAddress ::/0 -Action Block -Profile Any -Force \
@@ -1841,15 +2241,21 @@ impl WgRunner for RealWgRunner {
 
         #[cfg(target_os = "windows")]
         {
-            let _ = Command::new("netsh")
-                .args([
-                    "advfirewall",
-                    "set",
-                    "allprofiles",
-                    "firewallpolicy",
-                    "allowoutbound,allowinbound",
-                ])
-                .status();
+            let policy = {
+                let mut state = self.state.lock().await;
+                state.original_firewall_policy.take()
+            };
+            if let Some(policy) = policy {
+                let _ = Command::new("netsh")
+                    .args([
+                        "advfirewall",
+                        "set",
+                        "allprofiles",
+                        "firewallpolicy",
+                        &policy,
+                    ])
+                    .status();
+            }
             let _ = Command::new("netsh")
                 .args([
                     "advfirewall",
@@ -1878,6 +2284,10 @@ impl WgRunner for RealWgRunner {
                     "Remove-NetFirewallRule -DisplayName 'MarinVPN Bypass - *'",
                 ])
                 .status();
+
+            self.restore_dns().await;
         }
+
+        self.clear_bypass_routes().await;
     }
 }

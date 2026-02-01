@@ -24,6 +24,7 @@ pub struct ConnectionState {
     pub regions: Signal<Vec<Region>>,
     pub account_number: Signal<Option<String>>,
     pub auth_token: Signal<Option<String>>,
+    pub refresh_token: Signal<Option<String>>,
     pub account_expiry: Signal<Option<i64>>,
     pub settings: Signal<crate::models::SettingsState>,
     pub connected_since: Signal<Option<f64>>,
@@ -43,7 +44,8 @@ pub fn AppStateProvider(children: Element) -> Element {
     let mut current_location = use_signal(|| "Sweden, Stockholm".to_string());
     let mut regions = use_signal(crate::data::get_default_regions);
     let account_number = use_signal(|| config.account_number.clone());
-    let auth_token = use_signal(|| config.auth_token.clone());
+    let mut auth_token = use_signal(|| config.auth_token.clone());
+    let mut refresh_token = use_signal(|| config.refresh_token.clone());
     let account_expiry = use_signal(|| config.account_expiry);
     let device_name = use_signal(|| {
         config
@@ -57,6 +59,7 @@ pub fn AppStateProvider(children: Element) -> Element {
     let scroll_to = use_signal(|| None);
     let mut download_speed = use_signal(|| 0.0);
     let mut upload_speed = use_signal(|| 0.0);
+    let mut auto_connect_started = use_signal(|| false);
 
     let vpn_service = use_hook(WireGuardService::new);
     let toast_manager = use_context::<ToastManager>();
@@ -185,14 +188,60 @@ pub fn AppStateProvider(children: Element) -> Element {
                         }
                         let s = settings.peek().clone();
                         let auth = Some((acc_num.clone(), token.clone()));
+                        let mut entry_loc = entry;
+                        let mut exit_loc = exit;
+                        if entry_loc == "Automatic" || entry_loc.contains("Auto") {
+                            match ServersService::find_best_server(None).await {
+                                Ok(best) => {
+                                    entry_loc = format!("{}, {}", best.country, best.city);
+                                }
+                                Err(e) => {
+                                    toasts.show(
+                                        &format!("Auto-select entry failed: {}", e),
+                                        ToastType::Error,
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        if exit_loc == "Automatic" || exit_loc.contains("Auto") {
+                            let exclude_entry = vec![entry_loc.clone()];
+                            match ServersService::find_best_server_excluding(None, &exclude_entry)
+                                .await
+                            {
+                                Ok(best) => {
+                                    exit_loc = format!("{}, {}", best.country, best.city);
+                                }
+                                Err(e) => {
+                                    toasts.show(
+                                        &format!("Auto-select exit failed: {}", e),
+                                        ToastType::Error,
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        if entry_loc == exit_loc {
+                            let exclude_entry = vec![entry_loc.clone()];
+                            if let Ok(best) =
+                                ServersService::find_best_server_excluding(None, &exclude_entry)
+                                    .await
+                            {
+                                let candidate = format!("{}, {}", best.country, best.city);
+                                if candidate != entry_loc {
+                                    exit_loc = candidate;
+                                }
+                            }
+                        }
+
                         let entry_fut = AuthService::get_anonymous_config(
-                            &entry,
+                            &entry_loc,
                             &token,
                             Some(s.dns_blocking.clone()),
                             s.quantum_resistant,
                         );
                         let exit_fut = AuthService::get_anonymous_config(
-                            &exit,
+                            &exit_loc,
                             &token,
                             Some(s.dns_blocking.clone()),
                             s.quantum_resistant,
@@ -200,7 +249,7 @@ pub fn AppStateProvider(children: Element) -> Element {
                         match tokio::join!(entry_fut, exit_fut) {
                             (Ok(e_cfg), Ok(x_cfg)) => {
                                 vpn_service
-                                    .connect(entry, e_cfg, Some((exit, x_cfg)), s, auth)
+                                    .connect(entry_loc, e_cfg, Some((exit_loc, x_cfg)), s, auth)
                                     .await
                             }
                             _ => toasts.show("Failed to fetch Multi-hop configs", ToastType::Error),
@@ -220,6 +269,7 @@ pub fn AppStateProvider(children: Element) -> Element {
         let cfg = AppConfig {
             account_number: account_number(),
             auth_token: auth_token(),
+            refresh_token: refresh_token(),
             account_expiry: account_expiry(),
             device_name: Some(device_name()),
             settings: Some(settings()),
@@ -228,6 +278,21 @@ pub fn AppStateProvider(children: Element) -> Element {
         async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let _ = tokio::task::spawn_blocking(move || save_config(&cfg)).await;
+        }
+    });
+
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            let cfg = load_config();
+            let current_auth = auth_token.peek().clone();
+            if current_auth != cfg.auth_token {
+                auth_token.set(cfg.auth_token.clone());
+            }
+            let current_refresh = refresh_token.peek().clone();
+            if current_refresh != cfg.refresh_token {
+                refresh_token.set(cfg.refresh_token.clone());
+            }
         }
     });
 
@@ -282,12 +347,42 @@ pub fn AppStateProvider(children: Element) -> Element {
         });
     });
 
+    let vpn_action_auto = vpn_action;
+    use_effect(move || {
+        let s = settings();
+        let account = account_number();
+        if !account.is_empty() && !auto_connect_started() && s.auto_connect {
+            auto_connect_started.set(true);
+            if s.multi_hop {
+                let entry = if s.entry_location.is_empty() {
+                    "Automatic".to_string()
+                } else {
+                    s.entry_location.clone()
+                };
+                let exit = if s.exit_location.is_empty() {
+                    "Automatic".to_string()
+                } else {
+                    s.exit_location.clone()
+                };
+                vpn_action_auto.send(VpnAction::MultiHopConnect(entry, exit));
+            } else {
+                let loc = if s.entry_location.is_empty() {
+                    "Automatic".to_string()
+                } else {
+                    s.entry_location.clone()
+                };
+                vpn_action_auto.send(VpnAction::Connect(loc));
+            }
+        }
+    });
+
     use_context_provider(|| ConnectionState {
         status,
         current_location,
         regions,
         account_number,
         auth_token,
+        refresh_token,
         account_expiry,
         settings,
         connected_since,

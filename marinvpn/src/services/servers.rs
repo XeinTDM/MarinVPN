@@ -1,4 +1,5 @@
 use crate::models::CommonVpnServer;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use once_cell::sync::Lazy;
 use std::time::{Duration, Instant};
 
@@ -48,11 +49,42 @@ impl ServersService {
             servers
         };
 
+        Self::select_best_server_from_candidates(candidates).await
+    }
+
+    pub async fn find_best_server_excluding(
+        country: Option<&str>,
+        exclude_locations: &[String],
+    ) -> Result<CommonVpnServer, String> {
+        if exclude_locations.is_empty() {
+            return Self::find_best_server(country).await;
+        }
+
+        let servers = Self::get_servers().await?;
+        let mut candidates: Vec<CommonVpnServer> = Vec::new();
+        for server in servers.into_iter() {
+            if country.map_or(true, |c| server.country == c) {
+                let location = format!("{}, {}", server.country, server.city);
+                if exclude_locations.iter().any(|ex| ex == &location) {
+                    continue;
+                }
+                candidates.push(server);
+            }
+        }
+
+        if candidates.is_empty() {
+            return Self::find_best_server(country).await;
+        }
+
+        Self::select_best_server_from_candidates(candidates).await
+    }
+
+    async fn select_best_server_from_candidates(
+        candidates: Vec<CommonVpnServer>,
+    ) -> Result<CommonVpnServer, String> {
         if candidates.is_empty() {
             return Err("No servers found".to_string());
         }
-
-        use futures_util::stream::{FuturesUnordered, StreamExt};
 
         let mut futures = FuturesUnordered::new();
         for server in candidates {
@@ -66,7 +98,6 @@ impl ServersService {
 
         let mut best_option: Option<(CommonVpnServer, f64)> = None;
         while let Some((server, latency)) = futures.next().await {
-            // Calculate a local health score: 70% load (from server) + 30% local latency
             let local_score = (server.current_load as f64 * 0.7) + (latency as f64 * 0.3);
 
             if best_option.is_none() || local_score < best_option.as_ref().unwrap().1 {
@@ -80,10 +111,6 @@ impl ServersService {
     }
 
     pub async fn measure_latency(endpoint: &str) -> Option<u32> {
-        // WireGuard is UDP and doesn't respond to TCP handshakes.
-        // We use a quick UDP socket bind/connect to capture the resolution latency,
-        // and we cap the timeout so the UI stays responsive.
-
         let start = Instant::now();
         let timeout = Duration::from_millis(800);
 
@@ -100,7 +127,6 @@ impl ServersService {
             return Some(capped.max(1));
         }
 
-        // Fallback: If we have the server list, find the reported latency
         if let Ok(cache) = SERVER_CACHE.try_lock() {
             if let Some(s) = cache.0.iter().find(|s| s.endpoint == endpoint) {
                 return Some(s.avg_latency);
